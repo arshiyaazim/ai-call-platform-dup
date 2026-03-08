@@ -12,13 +12,31 @@ RETENTION_DAYS=7
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 STEP=0
-TOTAL=6
+TOTAL=7
 
 echo "============================================"
 echo " Backup — $TIMESTAMP"
 echo "============================================"
 
 mkdir -p "$BACKUP_DIR"
+
+# ── Pre-backup health check ────────────────────────────────
+STEP=$((STEP + 1))
+echo "[$STEP/$TOTAL] Pre-backup health check..."
+HEALTHY=true
+for svc in ai-postgres ai-redis minio qdrant; do
+    if docker inspect --format='{{.State.Health.Status}}' "$svc" 2>/dev/null | grep -q "healthy"; then
+        echo "  ✓ $svc — healthy"
+    elif docker inspect --format='{{.State.Status}}' "$svc" 2>/dev/null | grep -q "running"; then
+        echo "  ⚠ $svc — running (no healthcheck)"
+    else
+        echo "  ✗ $svc — NOT running"
+        HEALTHY=false
+    fi
+done
+if [ "$HEALTHY" = false ]; then
+    echo "  WARNING: Some services are down. Backup may be incomplete."
+fi
 
 # ── PostgreSQL dump ─────────────────────────────────────────
 STEP=$((STEP + 1))
@@ -32,11 +50,12 @@ fi
 # ── Qdrant snapshot ─────────────────────────────────────────
 STEP=$((STEP + 1))
 echo "[$STEP/$TOTAL] Backing up Qdrant vector database..."
-QDRANT_SNAPSHOT=$(curl -sf -X POST "http://localhost:6333/snapshots" 2>/dev/null | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4) || true
+QDRANT_SNAPSHOT=$(docker exec qdrant curl -sf -X POST "http://localhost:6333/snapshots" 2>/dev/null | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4) || true
 if [ -n "${QDRANT_SNAPSHOT:-}" ]; then
-    curl -sf "http://localhost:6333/snapshots/${QDRANT_SNAPSHOT}" -o "$BACKUP_DIR/qdrant-$TIMESTAMP.snapshot" 2>/dev/null
-    # Clean up snapshot from Qdrant server
-    curl -sf -X DELETE "http://localhost:6333/snapshots/${QDRANT_SNAPSHOT}" >/dev/null 2>&1 || true
+    docker exec qdrant curl -sf "http://localhost:6333/snapshots/${QDRANT_SNAPSHOT}" -o "/tmp/${QDRANT_SNAPSHOT}" 2>/dev/null
+    docker cp "qdrant:/tmp/${QDRANT_SNAPSHOT}" "$BACKUP_DIR/qdrant-$TIMESTAMP.snapshot"
+    docker exec qdrant rm -f "/tmp/${QDRANT_SNAPSHOT}" 2>/dev/null || true
+    docker exec qdrant curl -sf -X DELETE "http://localhost:6333/snapshots/${QDRANT_SNAPSHOT}" >/dev/null 2>&1 || true
     echo "  ✓ Saved: qdrant-$TIMESTAMP.snapshot ($(du -h "$BACKUP_DIR/qdrant-$TIMESTAMP.snapshot" | cut -f1))"
 else
     echo "  ⚠ Qdrant snapshot skipped (service unavailable or no data)"
@@ -59,7 +78,12 @@ STEP=$((STEP + 1))
 echo "[$STEP/$TOTAL] Backing up MinIO metadata..."
 docker exec minio mc alias set local http://localhost:9000 "${MINIO_ACCESS_KEY:-minioadmin}" "${MINIO_SECRET_KEY:-minioadmin}" >/dev/null 2>&1 || true
 docker exec minio mc ls local/ > "$BACKUP_DIR/minio-buckets-$TIMESTAMP.txt" 2>/dev/null || true
-echo "  ✓ Saved bucket listing"
+# Backup bucket policies and metadata
+docker exec minio mc stat local/ > "$BACKUP_DIR/minio-stats-$TIMESTAMP.txt" 2>/dev/null || true
+for bucket in $(docker exec minio mc ls --json local/ 2>/dev/null | grep -o '"key":"[^"]*"' | cut -d'"' -f4); do
+    docker exec minio mc policy get "local/${bucket}" >> "$BACKUP_DIR/minio-policies-$TIMESTAMP.txt" 2>/dev/null || true
+done
+echo "  ✓ Saved bucket listing + metadata"
 
 # ── Docker Compose config snapshot ──────────────────────────
 STEP=$((STEP + 1))
@@ -77,7 +101,7 @@ echo "  ✓ Saved compose + env + configs snapshots"
 STEP=$((STEP + 1))
 echo "[$STEP/$TOTAL] Cleaning backups older than $RETENTION_DAYS days..."
 DELETED=0
-for pattern in "*.sql.gz" "*.snapshot" "*.rdb" "minio-buckets-*.txt" "docker-compose-*.yaml" "env-*.bak" "configs-*.tar.gz"; do
+for pattern in "*.sql.gz" "*.snapshot" "*.rdb" "minio-buckets-*.txt" "minio-stats-*.txt" "minio-policies-*.txt" "docker-compose-*.yaml" "env-*.bak" "configs-*.tar.gz"; do
     COUNT=$(find "$BACKUP_DIR" -name "$pattern" -mtime +$RETENTION_DAYS -delete -print 2>/dev/null | wc -l)
     DELETED=$((DELETED + COUNT))
 done
