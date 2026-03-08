@@ -4,12 +4,21 @@
 # ============================================================
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 import httpx
 import logging
 from typing import Optional
 from datetime import datetime
+
+from schemas import (
+    ChatRequest, ChatResponse,
+    DecisionRequest, DecisionResponse,
+    MemoryStoreRequest, MemorySearchRequest,
+    KnowledgeIngestRequest,
+    TaskCreateRequest,
+    WebSearchRequest,
+    TrainRequest,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("fazle-api")
@@ -59,20 +68,6 @@ async def health():
 
 
 # ── Decision endpoint (Dograh integration) ──────────────────
-class DecisionRequest(BaseModel):
-    caller: str = Field(..., description="Name or identifier of the caller")
-    intent: str = Field(..., description="Detected intent of the call")
-    conversation_context: str = Field("", description="Recent conversation transcript")
-    metadata: dict = Field(default_factory=dict)
-
-
-class DecisionResponse(BaseModel):
-    response: str
-    confidence: float = 1.0
-    actions: list = Field(default_factory=list)
-    memory_updates: list = Field(default_factory=list)
-
-
 @app.post("/fazle/decision", response_model=DecisionResponse, dependencies=[Depends(verify_api_key)])
 async def make_decision(request: DecisionRequest):
     """Dograh calls this endpoint to get AI decisions for voice interactions."""
@@ -90,18 +85,6 @@ async def make_decision(request: DecisionRequest):
 
 
 # ── Chat endpoint ───────────────────────────────────────────
-class ChatRequest(BaseModel):
-    message: str
-    conversation_id: Optional[str] = None
-    user: str = "Azim"
-
-
-class ChatResponse(BaseModel):
-    reply: str
-    conversation_id: str
-    memory_updates: list = Field(default_factory=list)
-
-
 @app.post("/fazle/chat", response_model=ChatResponse, dependencies=[Depends(verify_api_key)])
 async def chat(request: ChatRequest):
     """Text chat with Fazle."""
@@ -119,13 +102,6 @@ async def chat(request: ChatRequest):
 
 
 # ── Memory proxy ────────────────────────────────────────────
-class MemoryStoreRequest(BaseModel):
-    type: str = Field(..., description="Memory type: preference, contact, knowledge, personal, conversation")
-    user: str = "Azim"
-    content: dict = Field(default_factory=dict)
-    text: str = ""
-
-
 @app.post("/fazle/memory", dependencies=[Depends(verify_api_key)])
 async def store_memory(request: MemoryStoreRequest):
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -139,12 +115,6 @@ async def store_memory(request: MemoryStoreRequest):
         except httpx.HTTPError as e:
             logger.error(f"Memory service error: {e}")
             raise HTTPException(status_code=502, detail="Memory service unavailable")
-
-
-class MemorySearchRequest(BaseModel):
-    query: str
-    memory_type: Optional[str] = None
-    limit: int = 5
 
 
 @app.post("/fazle/memory/search", dependencies=[Depends(verify_api_key)])
@@ -164,12 +134,12 @@ async def search_memory(request: MemorySearchRequest):
 
 # ── Knowledge ingestion proxy ───────────────────────────────
 @app.post("/fazle/knowledge/ingest", dependencies=[Depends(verify_api_key)])
-async def ingest_knowledge(text: str = "", source: str = "manual", title: str = ""):
+async def ingest_knowledge(request: KnowledgeIngestRequest):
     async with httpx.AsyncClient(timeout=60.0) as client:
         try:
             resp = await client.post(
                 f"{settings.memory_url}/ingest",
-                json={"text": text, "source": source, "title": title},
+                json=request.model_dump(),
             )
             resp.raise_for_status()
             return resp.json()
@@ -179,14 +149,6 @@ async def ingest_knowledge(text: str = "", source: str = "manual", title: str = 
 
 
 # ── Task proxy ──────────────────────────────────────────────
-class TaskCreateRequest(BaseModel):
-    title: str
-    description: str = ""
-    scheduled_at: Optional[str] = None
-    task_type: str = "reminder"
-    payload: dict = Field(default_factory=dict)
-
-
 @app.post("/fazle/tasks", dependencies=[Depends(verify_api_key)])
 async def create_task(request: TaskCreateRequest):
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -215,11 +177,6 @@ async def list_tasks():
 
 
 # ── Web intelligence proxy ──────────────────────────────────
-class WebSearchRequest(BaseModel):
-    query: str
-    max_results: int = 5
-
-
 @app.post("/fazle/web/search", dependencies=[Depends(verify_api_key)])
 async def web_search(request: WebSearchRequest):
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -236,12 +193,6 @@ async def web_search(request: WebSearchRequest):
 
 
 # ── Training proxy ──────────────────────────────────────────
-class TrainRequest(BaseModel):
-    transcript: str
-    user: str = "Azim"
-    session_type: str = "conversation"
-
-
 @app.post("/fazle/train", dependencies=[Depends(verify_api_key)])
 async def train(request: TrainRequest):
     async with httpx.AsyncClient(timeout=30.0) as client:
