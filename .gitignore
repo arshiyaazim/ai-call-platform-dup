@@ -1,0 +1,28 @@
+# Secrets — NEVER commit
+.env
+.env.local
+.env.production
+New VPS Password.txt
+
+# Local validation workspace
+local-validation/
+
+# Project files
+Project developmenmt.docx
+
+# Node
+node_modules/
+.next/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
