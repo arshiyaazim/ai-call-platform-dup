@@ -42,7 +42,7 @@ services:
 
   # ── Cache / Pub-Sub ──────────────────────────────────────
   redis:
-    image: redis:7.2.5-alpine
+    image: redis:8.0.2-alpine
     container_name: ai-redis
     restart: always
     command: >
@@ -75,7 +75,7 @@ services:
 
   # ── Object Storage ───────────────────────────────────────
   minio:
-    image: minio/minio:RELEASE.2024-11-11T11-18-37Z
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: minio
     restart: always
     command: server /data --console-address ":9001"
@@ -289,10 +289,7 @@ services:
     restart: always
     command: tunnel --no-autoupdate --url http://api:8000 --metrics 0.0.0.0:2000
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:2000/ready || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      test: ["NONE"]
     logging:
       driver: "json-file"
       options:
@@ -313,7 +310,7 @@ services:
 
   # ── Qdrant — Vector Database for Fazle Memory ─────────────
   qdrant:
-    image: qdrant/qdrant:v1.12.1
+    image: qdrant/qdrant:v1.17.0
     container_name: qdrant
     restart: always
     volumes:
@@ -343,6 +340,9 @@ services:
     image: ollama/ollama:0.3.14
     container_name: ollama
     restart: always
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     volumes:
       - ollama_data:/root/.ollama
     environment:

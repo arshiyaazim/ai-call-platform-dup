@@ -25,7 +25,7 @@ logger = logging.getLogger("fazle-api")
 
 
 class Settings(BaseSettings):
-    fazle_api_key: str = ""
+    api_key: str = ""
     brain_url: str = "http://fazle-brain:8200"
     memory_url: str = "http://fazle-memory:8300"
     task_url: str = "http://fazle-task-engine:8400"
@@ -55,9 +55,9 @@ app.add_middleware(
 
 
 async def verify_api_key(x_api_key: Optional[str] = Header(None)):
-    if not settings.fazle_api_key or settings.fazle_api_key == "":
+    if not settings.api_key or settings.api_key == "":
         raise HTTPException(status_code=500, detail="FAZLE_API_KEY not configured")
-    if x_api_key != settings.fazle_api_key:
+    if x_api_key != settings.api_key:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
