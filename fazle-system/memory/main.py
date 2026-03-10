@@ -100,6 +100,7 @@ class StoreRequest(BaseModel):
     user: str = "Azim"
     content: dict = Field(default_factory=dict)
     text: str = ""
+    user_id: Optional[str] = Field(None, description="Owner user ID for privacy isolation")
 
 
 @app.post("/store")
@@ -129,6 +130,8 @@ async def store_memory(request: StoreRequest):
         "text": text_to_embed,
         "created_at": datetime.utcnow().isoformat(),
     }
+    if request.user_id:
+        payload["user_id"] = request.user_id
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
@@ -157,6 +160,7 @@ class SearchRequest(BaseModel):
     query: str
     memory_type: Optional[str] = None
     limit: int = 5
+    user_id: Optional[str] = Field(None, description="Filter memories by owner user ID")
 
 
 @app.post("/search")
@@ -174,10 +178,14 @@ async def search_memories(request: SearchRequest):
         "with_payload": True,
     }
 
+    # Build filter conditions
+    filter_conditions = []
     if request.memory_type and request.memory_type in MEMORY_TYPES:
-        search_body["filter"] = {
-            "must": [{"key": "type", "match": {"value": request.memory_type}}]
-        }
+        filter_conditions.append({"key": "type", "match": {"value": request.memory_type}})
+    if request.user_id:
+        filter_conditions.append({"key": "user_id", "match": {"value": request.user_id}})
+    if filter_conditions:
+        search_body["filter"] = {"must": filter_conditions}
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:

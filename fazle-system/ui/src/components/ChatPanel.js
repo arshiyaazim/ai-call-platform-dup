@@ -76,7 +76,7 @@ export default function ChatPanel() {
     <div className="flex flex-col h-full">
       <div className="border-b border-gray-800 p-4">
         <h2 className="text-lg font-semibold text-gray-200">
-          Chat with Fazle
+          Chat with Azim
         </h2>
         <p className="text-xs text-gray-500">
           Say &quot;Fazle, remember...&quot; to store preferences

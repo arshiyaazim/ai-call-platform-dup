@@ -15,6 +15,7 @@ from typing import Optional
 import os
 from datetime import datetime
 from memory_manager import conversation_get, conversation_set
+from persona_engine import build_system_prompt
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("fazle-brain")
@@ -47,7 +48,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SYSTEM_PROMPT = """You are Fazle, a personal AI assistant for Azim. You are intelligent, direct, and helpful.
+# Default system prompt — used as fallback when no user context is provided
+DEFAULT_SYSTEM_PROMPT = """You are Fazle, a personal AI assistant for Azim. You are intelligent, direct, and helpful.
 
 Your capabilities:
 - Remember personal preferences, contacts, and important information
@@ -118,13 +120,16 @@ async def query_llm(messages: list[dict]) -> dict:
     return await query_openai(messages)
 
 
-async def retrieve_memories(query: str, memory_type: Optional[str] = None) -> list[dict]:
-    """Retrieve relevant memories from memory service."""
+async def retrieve_memories(query: str, memory_type: Optional[str] = None, user_id: Optional[str] = None) -> list[dict]:
+    """Retrieve relevant memories from memory service, optionally filtered by user."""
+    body: dict = {"query": query, "memory_type": memory_type, "limit": 5}
+    if user_id:
+        body["user_id"] = user_id
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             resp = await client.post(
                 f"{settings.memory_url}/search",
-                json={"query": query, "memory_type": memory_type, "limit": 5},
+                json=body,
             )
             if resp.status_code == 200:
                 return resp.json().get("results", [])
@@ -133,19 +138,22 @@ async def retrieve_memories(query: str, memory_type: Optional[str] = None) -> li
     return []
 
 
-async def store_memory_updates(updates: list[dict]):
+async def store_memory_updates(updates: list[dict], user_id: Optional[str] = None, user_name: str = "Azim"):
     """Store memory updates extracted by the LLM."""
     async with httpx.AsyncClient(timeout=10.0) as client:
         for update in updates:
             try:
+                body = {
+                    "type": update.get("type", "personal"),
+                    "user": user_name,
+                    "content": update.get("content", {}),
+                    "text": update.get("text", str(update.get("content", ""))),
+                }
+                if user_id:
+                    body["user_id"] = user_id
                 await client.post(
                     f"{settings.memory_url}/store",
-                    json={
-                        "type": update.get("type", "personal"),
-                        "user": "Azim",
-                        "content": update.get("content", {}),
-                        "text": update.get("text", str(update.get("content", ""))),
-                    },
+                    json=body,
                 )
             except Exception as e:
                 logger.warning(f"Memory store failed: {e}")
@@ -205,7 +213,7 @@ async def decide(request: DecisionRequest):
         )
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
         {
             "role": "user",
             "content": (
@@ -248,6 +256,9 @@ class ChatRequest(BaseModel):
     message: str
     conversation_id: Optional[str] = None
     user: str = "Azim"
+    user_id: Optional[str] = None
+    user_name: Optional[str] = None
+    relationship: Optional[str] = None
 
 
 @app.post("/chat")
@@ -255,8 +266,20 @@ async def chat(request: ChatRequest):
     """Interactive chat with Fazle."""
     conversation_id = request.conversation_id or str(uuid.uuid4())
 
-    # Retrieve relevant memories
-    memories = await retrieve_memories(request.message)
+    # Determine user context for persona
+    user_name = request.user_name or request.user or "Azim"
+    relationship = request.relationship or "self"
+    user_id = request.user_id
+
+    # Build persona-aware system prompt
+    system_prompt = build_system_prompt(
+        user_name=user_name,
+        relationship=relationship,
+        user_id=user_id,
+    )
+
+    # Retrieve relevant memories (filtered by user_id for privacy)
+    memories = await retrieve_memories(request.message, user_id=user_id)
     memory_context = ""
     if memories:
         memory_context = "\n\nRelevant memories:\n" + "\n".join(
@@ -266,7 +289,7 @@ async def chat(request: ChatRequest):
     # Build conversation history
     history = conversation_get(conversation_id)
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT + memory_context},
+        {"role": "system", "content": system_prompt + memory_context},
         *history[-10:],  # Keep last 10 turns
         {"role": "user", "content": request.message},
     ]
@@ -288,21 +311,24 @@ async def chat(request: ChatRequest):
 
     # Process side effects
     if memory_updates:
-        await store_memory_updates(memory_updates)
+        await store_memory_updates(memory_updates, user_id=user_id, user_name=user_name)
     if actions:
         await execute_actions(actions)
 
-    # Store conversation memory
+    # Store conversation memory (tagged with user_id for privacy isolation)
+    conv_body: dict = {
+        "type": "conversation",
+        "user": user_name,
+        "content": {"message": request.message, "reply": reply, "conversation_id": conversation_id},
+        "text": f"{user_name} said: {request.message}. Azim replied: {reply}",
+    }
+    if user_id:
+        conv_body["user_id"] = user_id
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             await client.post(
                 f"{settings.memory_url}/store",
-                json={
-                    "type": "conversation",
-                    "user": request.user,
-                    "content": {"message": request.message, "reply": reply, "conversation_id": conversation_id},
-                    "text": f"User said: {request.message}. Fazle replied: {reply}",
-                },
+                json=conv_body,
             )
         except Exception:
             pass

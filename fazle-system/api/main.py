@@ -216,14 +216,24 @@ async def make_decision(request: DecisionRequest):
 
 
 # ── Chat endpoint ───────────────────────────────────────────
-@app.post("/fazle/chat", response_model=ChatResponse, dependencies=[Depends(verify_auth)])
-async def chat(request: ChatRequest):
-    """Text chat with Fazle."""
+@app.post("/fazle/chat", response_model=ChatResponse)
+async def chat(
+    request: ChatRequest,
+    auth_user: dict = Depends(verify_auth),
+):
+    """Text chat with Fazle. Injects authenticated user context for persona engine."""
+    body = request.model_dump()
+    # Inject user context from JWT for persona-aware responses
+    if isinstance(auth_user, dict) and auth_user.get("id") != "api-key":
+        body["user_id"] = str(auth_user["id"])
+        body["user_name"] = auth_user.get("name", "Azim")
+        body["relationship"] = auth_user.get("relationship_to_azim", "self")
+        body["user"] = auth_user.get("name", "Azim")
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             resp = await client.post(
                 f"{settings.brain_url}/chat",
-                json=request.model_dump(),
+                json=body,
             )
             resp.raise_for_status()
             return ChatResponse(**resp.json())
@@ -233,13 +243,16 @@ async def chat(request: ChatRequest):
 
 
 # ── Memory proxy ────────────────────────────────────────────
-@app.post("/fazle/memory", dependencies=[Depends(verify_auth)])
-async def store_memory(request: MemoryStoreRequest):
+@app.post("/fazle/memory")
+async def store_memory(request: MemoryStoreRequest, auth_user: dict = Depends(verify_auth)):
+    body = request.model_dump()
+    if isinstance(auth_user, dict) and auth_user.get("id") != "api-key":
+        body["user_id"] = str(auth_user["id"])
     async with httpx.AsyncClient(timeout=15.0) as client:
         try:
             resp = await client.post(
                 f"{settings.memory_url}/store",
-                json=request.model_dump(),
+                json=body,
             )
             resp.raise_for_status()
             return resp.json()
@@ -248,13 +261,17 @@ async def store_memory(request: MemoryStoreRequest):
             raise HTTPException(status_code=502, detail="Memory service unavailable")
 
 
-@app.post("/fazle/memory/search", dependencies=[Depends(verify_auth)])
-async def search_memory(request: MemorySearchRequest):
+@app.post("/fazle/memory/search")
+async def search_memory(request: MemorySearchRequest, auth_user: dict = Depends(verify_auth)):
+    body = request.model_dump()
+    # Non-admin users can only see their own memories
+    if isinstance(auth_user, dict) and auth_user.get("id") != "api-key" and auth_user.get("role") != "admin":
+        body["user_id"] = str(auth_user["id"])
     async with httpx.AsyncClient(timeout=15.0) as client:
         try:
             resp = await client.post(
                 f"{settings.memory_url}/search",
-                json=request.model_dump(),
+                json=body,
             )
             resp.raise_for_status()
             return resp.json()
