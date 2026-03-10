@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     task_url: str = "http://fazle-task-engine:8400"
     tools_url: str = "http://fazle-web-intelligence:8500"
     trainer_url: str = "http://fazle-trainer:8600"
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+    livekit_url: str = "wss://livekit.iamazim.com"
 
     class Config:
         env_prefix = "FAZLE_"
@@ -190,6 +193,40 @@ async def delete_family_member(user_id: str, admin: dict = Depends(require_admin
 async def setup_status():
     """Check if initial setup has been completed."""
     return {"setup_completed": count_users() > 0}
+
+
+# ── Voice (LiveKit token) ──────────────────────────────────
+@app.post("/fazle/voice/token")
+async def voice_token(auth_user: dict = Depends(verify_auth)):
+    """Generate a LiveKit access token for authenticated users."""
+    if not settings.livekit_api_key or not settings.livekit_api_secret:
+        raise HTTPException(status_code=503, detail="Voice service not configured")
+
+    from livekit.api import AccessToken, VideoGrants
+
+    user_id = str(auth_user.get("id", "anonymous"))
+    user_name = auth_user.get("name", "User")
+    relationship = auth_user.get("relationship_to_azim", "self")
+
+    # Each user gets their own private room for voice chat with Azim
+    room_name = f"fazle-voice-{user_id}"
+
+    token = AccessToken(settings.livekit_api_key, settings.livekit_api_secret)
+    token.identity = user_id
+    token.name = user_name
+    token.metadata = relationship
+    token.add_grant(VideoGrants(
+        room_join=True,
+        room=room_name,
+        can_publish=True,
+        can_subscribe=True,
+    ))
+
+    return {
+        "token": token.to_jwt(),
+        "url": settings.livekit_url,
+        "room": room_name,
+    }
 
 
 # ── Health ──────────────────────────────────────────────────

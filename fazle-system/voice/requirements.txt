@@ -1,0 +1,6 @@
+livekit-agents==0.12.16
+livekit-plugins-openai==0.10.14
+livekit-plugins-silero==0.7.6
+livekit-api==0.7.1
+httpx==0.28.1
+pydantic-settings==2.7.1

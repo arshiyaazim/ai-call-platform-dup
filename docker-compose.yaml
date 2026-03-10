@@ -388,6 +388,9 @@ services:
       FAZLE_TASK_URL: "http://fazle-task-engine:8400"
       FAZLE_TOOLS_URL: "http://fazle-web-intelligence:8500"
       FAZLE_TRAINER_URL: "http://fazle-trainer:8600"
+      FAZLE_LIVEKIT_API_KEY: "${LIVEKIT_API_KEY:-devkey}"
+      FAZLE_LIVEKIT_API_SECRET: "${LIVEKIT_API_SECRET:-devsecret_min32chars_change_me}"
+      FAZLE_LIVEKIT_URL: "${FAZLE_LIVEKIT_URL:-wss://livekit.iamazim.com}"
     logging:
       driver: "json-file"
       options:
@@ -610,6 +613,42 @@ services:
       retries: 3
       start_period: 30s
     networks:
+      - ai-network
+
+  # ── Fazle Voice Agent — LiveKit-based STT/TTS ─────────────
+  fazle-voice:
+    build: ./fazle-system/voice
+    container_name: fazle-voice
+    restart: always
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      LIVEKIT_API_KEY: "${LIVEKIT_API_KEY:-}"
+      LIVEKIT_API_SECRET: "${LIVEKIT_API_SECRET:-}"
+      LIVEKIT_URL: "ws://livekit:7880"
+      FAZLE_VOICE_BRAIN_URL: "http://fazle-brain:8200"
+      FAZLE_VOICE_TTS_VOICE: "${FAZLE_VOICE_TTS_VOICE:-alloy}"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          memory: 128M
+    depends_on:
+      livekit:
+        condition: service_healthy
+      fazle-brain:
+        condition: service_healthy
+    networks:
+      - app-network
       - ai-network
 
   # ── Fazle UI — Next.js Dashboard ──────────────────────────

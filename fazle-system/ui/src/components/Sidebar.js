@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 
 const tabs = [
   { id: "chat", label: "Chat", icon: "💬" },
+  { id: "voice", label: "Voice", icon: "🎙️" },
   { id: "memory", label: "Memory", icon: "🧠" },
   { id: "tasks", label: "Tasks", icon: "📋" },
   { id: "knowledge", label: "Knowledge", icon: "📚" },
