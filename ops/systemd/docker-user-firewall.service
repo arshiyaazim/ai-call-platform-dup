@@ -1,0 +1,13 @@
+[Unit]
+Description=DOCKER-USER iptables firewall rules for iamazim.com
+Documentation=file:///opt/iamazim/docs/phase2-firewall-ports.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash __REPO_PATH__/scripts/vps/docker_user_firewall.sh
+
+[Install]
+WantedBy=multi-user.target

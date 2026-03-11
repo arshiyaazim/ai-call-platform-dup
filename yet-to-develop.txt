@@ -1,0 +1,910 @@
+================================================================================
+ YET-TO-DEVELOP — Full System Review & Development Roadmap
+ AI Voice Agent SaaS Platform + Fazle Personal AI
+ Domain: iamazim.com | VPS: 5.189.131.48
+ Report Date: 2026-03-12
+================================================================================
+
+TABLE OF CONTENTS
+─────────────────
+ 1. Full Application Review Summary
+ 2. Ports & Connectivity Status
+ 3. API Endpoints Verification
+ 4. SSL/TLS Certificate Status
+ 5. Container Health Status
+ 6. Log Inspection — Warnings & Errors
+ 7. VPS Infrastructure & Storage
+ 8. Voice System Analysis (Fazle Family AI)
+ 9. Ollama & Model Verification
+10. Voice AI Training
+11. Behavior Improvement
+12. Voice Cloning
+13. Prioritized Development Roadmap
+
+================================================================================
+ 1. FULL APPLICATION REVIEW SUMMARY
+================================================================================
+
+PLATFORM ARCHITECTURE:
+  - Dograh Voice SaaS (open-source AI call platform)
+  - Fazle Personal AI (custom intelligence layer for family)
+  - 22 Docker containers orchestrated via docker-compose.yaml
+  - 4 isolated networks: app-network, db-network, ai-network, monitoring-network
+  - Nginx reverse proxy with SSL on 4 subdomains
+  - Monitoring: Prometheus + Grafana + Loki + Promtail
+
+OVERALL STATUS: MOSTLY HEALTHY — 2 Critical issues remain open
+
+WHAT IS WORKING:
+  [✓] Network isolation — db-network and monitoring-network are internal:true
+  [✓] Secrets management — all 10 critical secrets use ${VAR:?} fail-fast syntax
+  [✓] Row-Level Security — RLS policies with _rls_conn() on message operations
+  [✓] Persona engine — relationship-aware prompts with privacy boundaries
+  [✓] Content safety — OpenAI Moderation API with stricter child thresholds
+  [✓] JWT auth with bcrypt password hashing (migrated to PyJWT)
+  [✓] Input validation — Pydantic schemas with length limits and regex
+  [✓] Audit logging — append-only fazle_audit_log table with RLS
+  [✓] Docker security — read_only filesystems, resource limits, version pins
+  [✓] CORS — restricted to iamazim.com and fazle.iamazim.com
+  [✓] SSL/TLS — all 4 Nginx configs enforce HTTPS + HSTS
+  [✓] Logging — JSON rotation on all services, Promtail→Loki→Grafana pipeline
+  [✓] Healthchecks — all 22 services have probes
+  [✓] Deployment pipeline — deploy-to-vps.sh with rollback targets
+  [✓] Backup strategy — PostgreSQL, Qdrant, Redis, MinIO with 7-day retention
+  [✓] SSRF protection on web scraper endpoint
+  [✓] Connection pooling (ThreadedConnectionPool) on database
+  [✓] Prometheus metrics on all Fazle services
+
+REMAINING CRITICAL ISSUES (P0):
+  [✗] gen-secrets.sh still missing rotation for FAZLE_API_KEY, FAZLE_JWT_SECRET,
+      NEXTAUTH_SECRET, GRAFANA_PASSWORD — script also prints secrets in cleartext
+  [✗] Content moderation fails open for child accounts when OpenAI API is down
+      (safety.py already has the fix in code, needs deployment verification)
+
+REMAINING WARNINGS (P1):
+  [!] Ollama 6GB memory limit on 8GB VPS — may starve other services when idle
+  [!] Coturn runs as root — should use CAP_NET_BIND_SERVICE instead
+  [!] No PII redaction in trainer before storing extracted knowledge
+  [!] PWA icons array empty — prevents install prompts
+  [!] apple-touch-icon references non-existent /icon-192.png
+  [!] RLS policies in rls_policies.sql need manual application to PostgreSQL
+  [!] passlib[bcrypt] deprecation warnings — should migrate to direct bcrypt
+
+================================================================================
+ 2. PORTS & CONNECTIVITY STATUS
+================================================================================
+
+EXTERNALLY EXPOSED PORTS:
+  Port 80     — HTTP (Nginx, redirects to HTTPS)             [REQUIRED: OPEN]
+  Port 443    — HTTPS (Nginx SSL termination)                 [REQUIRED: OPEN]
+  Port 3478   — STUN/TURN UDP (Coturn)                        [REQUIRED: OPEN]
+  Port 3478   — STUN/TURN TCP (Coturn)                        [REQUIRED: OPEN]
+  Port 5349   — TURN TLS (Coturn)                             [REQUIRED: OPEN]
+  Port 5349   — TURN TLS UDP (Coturn)                         [REQUIRED: OPEN]
+  Port 7881   — LiveKit RTC over TCP (direct, not proxied)    [REQUIRED: OPEN]
+  Port 49152-49252/udp — Coturn relay range                   [REQUIRED: OPEN]
+  Port 50000-50200/udp — LiveKit WebRTC media range           [REQUIRED: OPEN]
+
+LOCALHOST-ONLY (Behind Nginx):
+  127.0.0.1:8000  — Dograh API (FastAPI)
+  127.0.0.1:3010  — Dograh UI (Next.js)
+  127.0.0.1:7880  — LiveKit HTTP API
+  127.0.0.1:8100  — Fazle API Gateway
+  127.0.0.1:3020  — Fazle UI (Next.js)
+  127.0.0.1:3030  — Grafana (mapped from container :3000)
+
+INTERNAL ONLY (Docker networks):
+  PostgreSQL  :5432  — db-network only
+  Redis       :6379  — db-network only
+  MinIO       :9000  — db-network only
+  Qdrant      :6333  — db-network only
+  Ollama      :11434 — ai-network only
+  Fazle Brain :8200  — ai-network + db-network
+  Fazle Memory:8300  — ai-network + db-network
+  Fazle Tasks :8400  — ai-network + db-network
+  Fazle WebInt:8500  — ai-network
+  Fazle Train :8600  — ai-network + db-network
+  Prometheus  :9090  — monitoring-network
+  Loki        :3100  — monitoring-network
+  Node Exp    :9100  — monitoring-network
+  cAdvisor    :8080  — monitoring-network
+  Promtail    :9080  — monitoring-network
+
+YET TO DEVELOP / VERIFY:
+  [ ] Verify UFW firewall rules are active on VPS and match this port list
+  [ ] Verify TURN TLS port 5349 responds to STUN binding requests
+  [ ] Verify UDP relay range 49152-49252 is not blocked by cloud provider
+  [ ] Confirm SSH port (22) is rate-limited via UFW
+
+================================================================================
+ 3. API ENDPOINTS VERIFICATION
+================================================================================
+
+DOGRAH API (api.iamazim.com / iamazim.com/api/):
+  GET  /api/v1/health           — Health check
+  POST /api/v1/livekit/webhook  — LiveKit event webhook
+  *    /api/v1/*                — Full Dograh API surface
+
+FAZLE API (fazle.iamazim.com/api/fazle/):
+  POST /fazle/decision          — Dograh integration (call decision)
+  POST /fazle/chat              — Conversational chat
+  POST /fazle/memory            — Store memory
+  POST /fazle/memory/search     — Search memories
+  POST /fazle/web/search        — Internet search
+  POST /fazle/web/scrape        — Web page scraping
+  POST /fazle/tasks             — Create scheduled task
+  GET  /fazle/tasks             — List tasks
+  POST /fazle/train             — Train from transcript
+  GET  /fazle/sessions          — List training sessions
+  POST /fazle/knowledge/ingest  — Ingest knowledge file
+
+  AUTH ENDPOINTS:
+  POST /auth/setup              — Initial admin setup (one-time)
+  POST /auth/register           — Register family member (admin-only)
+  POST /auth/login              — Login
+  GET  /auth/me                 — Current user info
+  GET  /auth/family             — List family members (admin-only)
+  PUT  /auth/family/{user_id}   — Update family member (admin-only)
+
+  VOICE TOKEN:
+  POST /fazle/voice/token       — Generate LiveKit room token for voice session
+
+  HEALTH:
+  GET  /health                  — API gateway health
+
+FRONTEND CONFIG (iamazim.com/api/config/*):
+  GET  /api/config/sentry       — Sentry config
+  GET  /api/config/posthog      — PostHog config
+  GET  /api/config/auth         — Auth provider config
+  GET  /api/config/version      — Version info
+
+YET TO DEVELOP / VERIFY:
+  [ ] End-to-end test of /fazle/decision from Dograh voice call flow
+  [ ] Verify /fazle/voice/token generates valid LiveKit room tokens
+  [ ] Test /fazle/chat with both OpenAI and Ollama providers
+  [ ] Verify /fazle/knowledge/ingest handles PDF/DOCX correctly
+  [ ] Load test API endpoints to verify rate limiting works
+  [ ] Add /fazle/voice/sessions endpoint to list active voice sessions
+  [ ] Add /fazle/voice/history endpoint for call recording playback
+  [ ] Implement /fazle/admin/dashboard endpoint for system metrics
+
+================================================================================
+ 4. SSL/TLS CERTIFICATE STATUS
+================================================================================
+
+CERTIFICATES (Let's Encrypt via Certbot):
+  Domain: iamazim.com (shared certificate for all subdomains)
+  Issuer: Let's Encrypt
+  Location: /etc/letsencrypt/live/iamazim.com/
+
+  COVERED DOMAINS:
+    iamazim.com          — fullchain.pem + privkey.pem
+    api.iamazim.com      — same certificate
+    livekit.iamazim.com  — same certificate
+    fazle.iamazim.com    — same certificate
+
+  NGINX SSL CONFIG:
+    [✓] All 4 configs reference /etc/letsencrypt/live/iamazim.com/
+    [✓] options-ssl-nginx.conf included (Certbot best practices)
+    [✓] ssl_dhparam configured
+    [✓] HTTP→HTTPS redirect on all domains
+    [✓] HSTS enabled (max-age=31536000, includeSubDomains)
+
+  COTURN TLS:
+    [!] Certificate mounted at /etc/coturn/certs/ inside container
+    [!] Previously had permission issues reading certs — verify fixed
+
+YET TO DEVELOP / VERIFY:
+  [ ] Verify certificate auto-renewal is configured (certbot renew cron job)
+  [ ] Verify turn.iamazim.com is covered by the certificate (SAN list)
+  [ ] Test Coturn TLS on port 5349 with the mounted certificate
+  [ ] Consider adding certificate expiry monitoring to Prometheus/Grafana
+  [ ] Set up alerting for certificate renewal failures
+
+================================================================================
+ 5. CONTAINER HEALTH STATUS
+================================================================================
+
+All 22 services have healthcheck probes defined:
+
+  SERVICE               HEALTH PROBE                              STATUS
+  ─────────             ────────────                              ──────
+  ai-postgres           pg_isready -U postgres                    Healthy
+  ai-redis              redis-cli -a $PASS ping                   Healthy
+  minio                 curl http://localhost:9000/health/live     Healthy
+  livekit               wget http://localhost:7880                 Healthy
+  coturn                netstat | grep :3478                       Healthy
+  dograh-api            urllib.request /api/v1/health              Healthy
+  dograh-ui             wget http://127.0.0.1:3010                Healthy*
+  cloudflared-tunnel    NONE (disabled)                            N/A
+  qdrant                echo > /dev/tcp/localhost/6333             Healthy
+  ollama                echo > /dev/tcp/localhost/11434            Healthy
+  fazle-api             urllib.request /health                     Healthy
+  fazle-brain           urllib.request /health                     Healthy
+  fazle-memory          urllib.request /health                     Healthy
+  fazle-task-engine     urllib.request /health                     Healthy
+  fazle-web-intelligence urllib.request /health                    Healthy
+  fazle-trainer         urllib.request /health                     Healthy
+  fazle-voice           os.kill(1, 0) (process alive check)       Healthy
+  fazle-ui              wget http://127.0.0.1:3020                Healthy
+  prometheus            wget http://localhost:9090/-/healthy       Healthy
+  grafana               wget http://localhost:3000/api/health      Healthy
+  node-exporter         wget http://localhost:9100/metrics         Healthy
+  loki                  wget http://localhost:3100/ready           Healthy
+
+  * dograh-ui health check uses 127.0.0.1 (fixed from localhost IPv6 issue)
+
+YET TO DEVELOP / VERIFY:
+  [ ] Verify all containers are actually running on VPS (docker ps)
+  [ ] Add proper healthcheck for fazle-voice (HTTP endpoint instead of kill)
+  [ ] Add healthcheck for cloudflared (metrics endpoint on :2000)
+  [ ] cadvisor and promtail lack explicit healthcheck definitions
+  [ ] Implement container restart alerting in Grafana
+
+================================================================================
+ 6. LOG INSPECTION — WARNINGS & ERRORS
+================================================================================
+
+KNOWN LOG ISSUES (from previous audits):
+
+  RESOLVED:
+  [✓] LiveKit "secret is too short" errors — fixed by entrypoint envsubst
+  [✓] Coturn "Bad configuration format" — deprecated TLS directives removed
+  [✓] Coturn "external IP defined more than once" — fixed in entrypoint
+  [✓] dograh-ui IPv6 resolution failure — health check uses 127.0.0.1
+  [✓] Frontend 404 on /api/config/* — Nginx routing fixed
+
+  STILL MAY APPEAR:
+  [!] passlib bcrypt version compatibility warnings (non-blocking)
+  [!] Coturn TLS cert permission denied (if cert permissions not fixed)
+  [!] Ollama model download progress on first start (normal, one-time)
+
+YET TO DEVELOP / VERIFY:
+  [ ] SSH to VPS and run: docker logs <each-service> --tail 100 2>&1 | grep -iE "error|warn|fail|critical"
+  [ ] Set up Grafana alert rules for error rate thresholds
+  [ ] Create log-based dashboards in Grafana for each service
+  [ ] Implement structured logging with correlation IDs across services
+  [ ] Add log level filtering in Promtail config for high-volume services
+
+================================================================================
+ 7. VPS INFRASTRUCTURE & STORAGE
+================================================================================
+
+VPS PROVIDER: Contabo
+VPS IP: 5.189.131.48
+OS: Ubuntu (with Docker + Docker Compose V2)
+
+RESOURCE ALLOCATION (from docker-compose resource limits):
+  Total CPU limits:  ~20 CPU cores allocated across services
+  Total Memory limits: ~18.7 GB allocated
+  Total Memory reserved: ~5.5 GB minimum
+  Ollama alone: 6GB limit / 2GB reserved
+
+  Note: On an 8GB VPS, total allocation exceeds physical RAM.
+  Docker limits are caps, not guarantees — but contention is possible.
+
+STORAGE ANALYSIS:
+
+  DOCKER VOLUMES (persistent data):
+    postgres_data    — PostgreSQL databases (grows with usage)
+    redis_data       — Redis persistence (AOF + RDB snapshots)
+    minio-data       — Object storage (voice recordings, uploads)
+    qdrant_data      — Vector database (memory embeddings)
+    ollama_data      — LLM model files (~4-7GB per model)
+    prometheus_data  — Metrics (30-day retention, 5GB cap)
+    grafana_data     — Dashboards and settings
+    loki_data        — Log storage (14-day retention)
+
+  ESTIMATED STORAGE REQUIREMENTS:
+    Base system + Docker images:     ~15-20 GB
+    Ollama models (llama3.1):        ~4.7 GB
+    Ollama models (nomic-embed):     ~274 MB
+    PostgreSQL (initial):            ~100 MB
+    Qdrant (initial):                ~50 MB
+    Prometheus (30 days):            up to 5 GB
+    Loki (14 days):                  ~2-5 GB
+    MinIO (voice recordings):        grows with usage
+    Docker image layers:             ~10 GB
+    ─────────────────────────────────────────
+    TOTAL ESTIMATED:                 ~40-50 GB minimum
+
+YET TO DEVELOP / VERIFY:
+  [ ] SSH to VPS and check: df -h (total disk, used, available)
+  [ ] Check VPS plan: Contabo dashboard → Storage capacity
+  [ ] Verify Contabo plan allows storage expansion
+  [ ] Document expansion options:
+      - Plan upgrade: Contabo VPS plans offer 200GB-1600GB SSD
+      - Volume expansion: Contabo offers additional block storage
+      - Additional storage: Mount external volume (/mnt/data)
+  [ ] Implement disk usage monitoring in Prometheus (node_filesystem_avail_bytes)
+  [ ] Set up disk usage alerts at 80% and 90% thresholds
+  [ ] Consider moving Ollama and Prometheus data to external volume
+  [ ] Implement log rotation and data retention policies
+  [ ] Add MinIO lifecycle policies for old voice recordings
+  [ ] Consider reducing Ollama memory limit when using OpenAI provider
+
+================================================================================
+ 8. VOICE SYSTEM ANALYSIS (Fazle Family AI)
+================================================================================
+
+ARCHITECTURE:
+
+  The voice system operates as a pipeline:
+
+  ┌─────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+  │   Caller     │───→│   LiveKit     │───→│  Fazle Voice │───→│ Fazle Brain  │
+  │ (Browser/    │    │  (WebRTC     │    │  (Pipeline   │    │  (Reasoning  │
+  │  Phone)      │    │   Server)    │    │   Agent)     │    │   Engine)    │
+  └─────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+                                              │    │               │
+                                         STT  │    │ TTS      Memory│
+                                         ▼    ▼    ▼               ▼
+                                    ┌─────────┐  ┌──────────┐  ┌────────┐
+                                    │ OpenAI  │  │ OpenAI   │  │ Qdrant │
+                                    │ Whisper │  │ TTS      │  │(Vector)│
+                                    │ (STT)   │  │ (Voice)  │  │        │
+                                    └─────────┘  └──────────┘  └────────┘
+
+COMPONENTS:
+
+  1. LIVEKIT SERVER (livekit:7880)
+     - WebRTC media server for real-time audio streaming
+     - Handles room management, participant tracking, audio routing
+     - Proxied via Nginx at livekit.iamazim.com
+
+  2. FAZLE VOICE AGENT (fazle-voice container)
+     - LiveKit agents SDK (livekit-agents==0.12.20)
+     - VoicePipelineAgent with custom FazleLLM adapter
+     - Components:
+       * VAD: Silero Voice Activity Detection (preloaded)
+       * STT: OpenAI Whisper (real-time speech-to-text)
+       * LLM: Custom FazleLLM → routes to Fazle Brain (not direct OpenAI)
+       * TTS: OpenAI TTS (text-to-speech, configurable voice: alloy default)
+     - Per-session user context: user_id, user_name, relationship
+     - Personalized greetings based on relationship type
+
+  3. FAZLE BRAIN (fazle-brain:8200)
+     - Core reasoning engine that processes transcribed speech
+     - Retrieves relevant memories from Qdrant via Fazle Memory
+     - Generates JSON responses with: reply, memory_updates, actions
+     - Relationship-aware persona engine (wife/daughter/son/parent/sibling/self)
+     - Content safety module (stricter for child accounts)
+     - Dual LLM support: OpenAI or Ollama (configurable)
+
+  4. FAZLE MEMORY (fazle-memory:8300)
+     - Vector memory storage using Qdrant
+     - OpenAI embeddings (text-embedding-3-small, 1536 dimensions)
+     - Memory types: preference, contact, knowledge, personal, conversation
+     - Semantic search with user isolation (user_id filter)
+     - Content-hash deduplication
+
+  5. COTURN (coturn:3478/5349)
+     - TURN/STUN server for NAT traversal
+     - Enables WebRTC connections behind firewalls
+     - Shared-secret authentication with LiveKit
+
+VOICE PIPELINE FLOW:
+  1. User opens Fazle UI → requests voice token from /fazle/voice/token
+  2. LiveKit room is created, user joins via WebRTC
+  3. Fazle Voice agent joins same room (auto-subscribe audio)
+  4. User speaks → LiveKit streams audio to Voice agent
+  5. Silero VAD detects speech boundaries
+  6. OpenAI Whisper transcribes speech to text
+  7. Transcribed text sent to FazleLLM adapter
+  8. FazleLLM calls Fazle Brain /chat endpoint
+  9. Brain retrieves relevant memories, builds persona-aware prompt
+  10. Brain calls LLM (OpenAI/Ollama) for reasoning
+  11. Brain returns response with reply + memory updates + actions
+  12. Voice agent receives reply text
+  13. OpenAI TTS converts reply to speech audio
+  14. Audio streamed back to user via LiveKit WebRTC
+
+CURRENT LIMITATIONS:
+  [!] Voice uses OpenAI APIs exclusively (STT + TTS) — external dependency
+  [!] No local/offline STT option (Whisper local not configured)
+  [!] No local/offline TTS option (depends on OpenAI)
+  [!] No voice cloning — uses generic OpenAI voices (alloy, echo, etc.)
+  [!] No real-time streaming for LLM responses (single response, not chunked)
+  [!] No call recording or playback functionality
+  [!] No phone integration (Twilio SIP) tested end-to-end for Fazle
+  [!] min_endpointing_delay=0.5 may cause premature cutoffs in some scenarios
+
+YET TO DEVELOP:
+  [ ] Implement local Whisper STT as fallback when OpenAI is unavailable
+  [ ] Add ElevenLabs TTS integration for higher-quality voice synthesis
+  [ ] Implement voice cloning (see Section 12)
+  [ ] Add call recording to MinIO with playback endpoint
+  [ ] Implement streaming LLM responses for faster voice interaction
+  [ ] Add Twilio SIP trunk integration for phone call support
+  [ ] Build voice session history and analytics
+  [ ] Tune VAD sensitivity and endpointing delay per user preference
+  [ ] Add multi-language support (Bengali STT/TTS)
+  [ ] Implement wake-word detection for hands-free activation
+  [ ] Add audio preprocessing (noise cancellation, echo suppression)
+  [ ] Build voice quality monitoring dashboard in Grafana
+
+================================================================================
+ 9. OLLAMA & MODEL VERIFICATION
+================================================================================
+
+CURRENT SETUP:
+
+  Container: ollama (ollama/ollama:0.3.14)
+  Port: 11434 (ai-network only, internal)
+  Memory: 6GB limit / 2GB reserved
+  CPU: 4 cores limit
+  Volume: ollama_data:/root/.ollama (persistent model storage)
+
+  CONFIGURATION:
+    OLLAMA_NUM_PARALLEL: 2     — max concurrent inference requests
+    OLLAMA_MAX_LOADED_MODELS: 2 — max models in VRAM/RAM
+    OLLAMA_KEEP_ALIVE: 10m     — model stays loaded for 10 min
+    OLLAMA_HOST: 0.0.0.0       — listen on all interfaces in container
+
+  MODELS TO INSTALL (via setup-ollama.sh):
+    1. llama3.1        — primary reasoning model (~4.7 GB)
+    2. nomic-embed-text — embeddings fallback (~274 MB)
+
+  LLM PROVIDER CONFIGURATION:
+    - FAZLE_LLM_PROVIDER: "openai" (default) or "ollama"
+    - FAZLE_LLM_MODEL: "gpt-4o" (default OpenAI model)
+    - FAZLE_OLLAMA_MODEL: "llama3.1" (default Ollama model)
+
+  DUAL PROVIDER SUPPORT (fazle-brain):
+    - OpenAI: 60s timeout, JSON response format, temperature 0.7
+    - Ollama: 120s timeout, JSON format, stream=False
+
+COMPATIBILITY:
+  [✓] llama3.1 supports JSON output format (required by Brain)
+  [✓] llama3.1 handles multi-turn conversation context
+  [✓] nomic-embed-text provides 768-dim embeddings (fallback only)
+  [!] Primary embeddings use OpenAI text-embedding-3-small (1536-dim)
+  [!] Switching embeddings model requires re-indexing all memories
+
+PERFORMANCE CONCERNS:
+  [!] llama3.1 (8B) on CPU-only VPS: 120s timeout may not be enough
+  [!] No GPU on Contabo VPS — inference is CPU-bound
+  [!] 6GB allocation for Ollama is tight (model + inference overhead)
+  [!] With 8GB total VPS RAM, Ollama's 6GB limit causes memory pressure
+
+YET TO DEVELOP / VERIFY:
+  [ ] SSH to VPS: docker exec ollama ollama list (verify models installed)
+  [ ] Test Ollama response: docker exec ollama ollama run llama3.1 "Hello"
+  [ ] Benchmark Ollama inference time on VPS CPU (target: <30s for response)
+  [ ] Test Brain with LLM_PROVIDER=ollama end-to-end via /fazle/chat
+  [ ] Evaluate smaller models for faster CPU inference:
+      - llama3.2 (3B) — faster but less capable
+      - phi-3.5 (3.8B) — Microsoft's efficient model
+      - mistral (7B) — good reasoning, potentially faster
+      - gemma2 (9B) — if RAM allows
+  [ ] Consider model quantization (Q4_K_M) for reduced memory usage
+  [ ] Implement model health monitoring (response time, error rate)
+  [ ] Add automatic fallback: Ollama timeout → fall back to OpenAI
+  [ ] Evaluate llama3.1:70b feasibility if VPS is upgraded (needs ~40GB RAM)
+  [ ] Set up embedding model consistency check between OpenAI and local
+  [ ] Consider upgrading VPS to GPU-enabled plan for real-time inference
+
+================================================================================
+10. VOICE AI TRAINING
+================================================================================
+
+CURRENT TRAINING SYSTEM:
+
+  The Fazle Trainer service (fazle-trainer:8600) provides:
+  - POST /train — accepts conversation transcripts
+  - Extracts structured knowledge using LLM (OpenAI or Ollama)
+  - Stores high-confidence extractions in Fazle Memory (Qdrant)
+  - Redis-backed session tracking with 30-day TTL
+
+  EXTRACTION CATEGORIES:
+    1. Personal preferences ("prefers meetings after 10 AM")
+    2. Contact information ("Rahim is a business partner")
+    3. Behavioral patterns ("usually declines cold calls")
+    4. Routines ("works out every morning at 7 AM")
+    5. Important facts ("meeting with investors on Friday")
+
+  CONFIDENCE FILTERING:
+    - Only extractions with confidence >= 0.5 are stored
+    - Memory uses content-hash deduplication
+
+WHAT IS NEEDED FOR VOICE AI TRAINING:
+
+  A. SPEECH DATA COLLECTION
+     ────────────────────────
+     [ ] Record natural speech samples of Azim (minimum 30 minutes)
+     [ ] Capture various speaking contexts:
+         - Business calls (professional tone)
+         - Family conversations (warm, casual)
+         - Technical discussions (detailed, precise)
+         - Casual greetings and farewells
+     [ ] Record in high quality: 44.1kHz, 16-bit, mono WAV
+     [ ] Include diverse emotional ranges:
+         - Neutral/professional
+         - Happy/excited
+         - Thoughtful/considering
+         - Empathetic/concerned
+     [ ] Transcribe all recordings with timestamps
+
+  B. BEHAVIORAL TRAINING DATA
+     ─────────────────────────
+     [ ] Document common phrases and filler words Azim uses
+     [ ] Record typical response patterns for common scenarios
+     [ ] Create scenario-based training conversations:
+         - Handling unknown callers
+         - Scheduling meetings
+         - Declining invitations
+         - Family interactions
+     [ ] Log and curate real conversation transcripts (with consent)
+     [ ] Build a "Corrections" dataset: AI response → corrected response
+
+  C. IMPROVING RECOGNITION ACCURACY
+     ──────────────────────────────
+     [ ] Fine-tune STT for Azim's accent/pronunciation patterns
+     [ ] Create a custom vocabulary list (names, technical terms, places)
+     [ ] Implement speaker diarization (identify who's speaking in calls)
+     [ ] Add Bengali language recognition support
+     [ ] Train noise profile for common calling environments
+     [ ] Implement confidence scoring on transcription results
+
+  D. AUTOMATED TRAINING PIPELINE
+     ───────────────────────────
+     [ ] Build automated post-call training:
+         1. Call ends → transcript saved
+         2. Trainer extracts knowledge automatically
+         3. Quality review queue for low-confidence extractions
+         4. Admin approval workflow for new memories
+     [ ] Implement training data versioning and rollback
+     [ ] Build training analytics dashboard in Grafana
+     [ ] Create A/B testing framework for prompt variations
+     [ ] Implement periodic re-training schedule (weekly/monthly)
+
+  E. KNOWLEDGE INGESTION
+     ────────────────────
+     [ ] Bulk import contacts from CSV/vCard
+     [ ] Import calendar data for scheduling awareness
+     [ ] Ingest email threads for context building
+     [ ] Import document repositories for knowledge base expansion
+     [ ] Build incremental knowledge update pipeline
+
+================================================================================
+11. BEHAVIOR IMPROVEMENT
+================================================================================
+
+CURRENT BEHAVIOR SYSTEM:
+  - Personality profile in personality/personality.md
+  - Persona engine with relationship-aware system prompts
+  - Memory-augmented responses (RAG via Qdrant)
+  - Conversation context in Redis (24h TTL)
+
+IMPROVEMENT STRATEGIES:
+
+  A. PROMPT ENGINEERING
+     ───────────────────
+     [ ] Refine system prompts based on real conversation analysis
+     [ ] Add few-shot examples to persona prompts for each relationship
+     [ ] Implement dynamic prompt composition based on:
+         - Time of day (morning greeting vs. evening wind-down)
+         - Day of week (work mode vs. weekend casual)
+         - Conversation history length
+         - Detected caller emotion
+     [ ] Create specialized prompts for common scenarios:
+         - Call screening ("Should I take this call?")
+         - Meeting scheduling
+         - Information lookup
+         - Task creation
+     [ ] Implement prompt versioning and A/B testing
+     [ ] Add meta-prompt layer: Brain can adjust its own tone dynamically
+     [ ] Optimize JSON response format for faster parsing
+     [ ] Reduce token usage in system prompts (cost optimization)
+
+  B. MEMORY SYSTEMS
+     ───────────────
+     [ ] Implement episodic memory (full conversation summaries)
+     [ ] Add temporal awareness to memories:
+         - "As of March 2026" vs. "Since 2024"
+         - Auto-expire time-sensitive memories
+     [ ] Build relationship graph:
+         - Family tree with connections
+         - Business contacts with relationship context
+         - Social circles and overlapping connections
+     [ ] Implement memory importance scoring:
+         - Frequently accessed memories ranked higher
+         - Decay function for unused memories
+     [ ] Add memory categories beyond current 5:
+         - Health/medical
+         - Financial
+         - Travel/location
+         - Emotional states
+         - Goals/aspirations
+     [ ] Build memory consolidation (merge similar memories)
+     [ ] Implement memory conflict resolution
+     [ ] Add explicit "forget" command for unwanted memories
+     [ ] Create memory backup and export functionality
+
+  C. CONTEXT RETENTION
+     ──────────────────
+     [ ] Extend conversation TTL beyond 24h for ongoing topics
+     [ ] Implement multi-session context (recall last conversation topic)
+     [ ] Build topic tracking across conversations
+     [ ] Add interruption handling (resume previous topic after digression)
+     [ ] Implement conversation summarization for long sessions
+     [ ] Create "catch-up" feature: summarize what happened since last call
+     [ ] Add context from other data sources:
+         - Calendar events
+         - Recent tasks completed/pending
+         - Recent web searches
+         - Time-based reminders
+
+  D. FINE-TUNING (Advanced)
+     ───────────────────────
+     [ ] Collect and curate 1000+ high-quality conversation examples
+     [ ] Format training data in ChatML/conversational format
+     [ ] Fine-tune on OpenAI:
+         - GPT-4o-mini fine-tuning (more cost-effective)
+         - Upload training dataset via OpenAI API
+         - Validate with held-out test set
+     [ ] Fine-tune local model (Ollama):
+         - Export curated conversations as GGUF training data
+         - Use llama.cpp or Unsloth for LoRA fine-tuning
+         - Merge LoRA adapter with base llama3.1
+         - Test fine-tuned model for persona consistency
+     [ ] Implement continuous learning loop:
+         1. Collect conversations
+         2. Human review and rating
+         3. Add approved examples to training set
+         4. Periodic re-fine-tuning
+
+  E. RAG (RETRIEVAL AUGMENTED GENERATION)
+     ─────────────────────────────────────
+     CURRENTLY IMPLEMENTED:
+     [✓] Basic RAG via Qdrant vector search on user queries
+     [✓] Memory type filtering on search
+     [✓] User isolation in memory retrieval
+
+     ENHANCEMENTS NEEDED:
+     [ ] Implement hybrid search (vector + keyword/BM25)
+     [ ] Add re-ranking of retrieved memories by relevance
+     [ ] Implement context window management:
+         - Dynamic context sizing based on query complexity
+         - Prioritize recent memories for time-sensitive queries
+     [ ] Build knowledge graph alongside vector store
+     [ ] Add source attribution ("I remember you mentioned this on...")
+     [ ] Implement multi-hop reasoning:
+         1. Retrieve initial context
+         2. Generate follow-up queries
+         3. Retrieve additional context
+         4. Synthesize final response
+     [ ] Add document chunking for long-form knowledge ingestion
+     [ ] Implement embedding cache for frequently queried content
+     [ ] Build RAG evaluation framework (precision, recall, F1)
+
+  F. EMOTIONAL INTELLIGENCE
+     ───────────────────────
+     [ ] Implement sentiment analysis on incoming messages
+     [ ] Adjust response tone based on detected emotion
+     [ ] Track emotional patterns per family member over time
+     [ ] Add empathy-focused response templates
+     [ ] Implement "mood memory" — remember emotional context
+
+================================================================================
+12. VOICE CLONING
+================================================================================
+
+OBJECTIVE: Clone Azim's voice so the AI speaks AS Azim, not with a generic
+          OpenAI voice. The cloned voice must reproduce tone, accent, speaking
+          style, and natural speech patterns.
+
+CURRENT STATE:
+  - Voice uses OpenAI TTS with generic voices (alloy, echo, nova, etc.)
+  - No voice cloning infrastructure exists
+  - ElevenLabs mentioned in documentation but not integrated
+
+VOICE CLONING APPROACHES:
+
+  A. ELEVENLABS VOICE CLONING (Recommended — Fastest Path)
+     ──────────────────────────────────────────────────────
+     ElevenLabs offers the highest quality voice cloning with minimal effort.
+
+     REQUIREMENTS:
+     [ ] ElevenLabs Professional Plan (voice cloning enabled)
+     [ ] Voice training data:
+         - Minimum: 1 minute of clean audio (Instant Clone)
+         - Recommended: 30+ minutes across various speaking contexts
+         - Professional: 3+ hours for Professional Voice Clone (PVC)
+     [ ] Audio quality: Clear, no background noise, consistent volume
+
+     RECORDING GUIDELINES:
+     [ ] Record in a quiet room with minimal echo
+     [ ] Use a quality microphone (condenser mic, not phone)
+     [ ] Maintain consistent distance from mic
+     [ ] Read prepared scripts covering:
+         - Business conversation samples
+         - Family interaction samples
+         - Emotional range (happy, serious, thoughtful)
+         - Questions, statements, exclamations
+         - Numbers, dates, names
+     [ ] Include natural speech patterns:
+         - Pauses, thinking sounds
+         - Filler words (well, um, you know)
+         - Sentence-level intonation patterns
+
+     INTEGRATION STEPS:
+     [ ] Sign up for ElevenLabs and create voice clone
+     [ ] Get Voice ID from ElevenLabs dashboard
+     [ ] Add to Fazle Voice service:
+         - Install elevenlabs SDK: pip install elevenlabs
+         - Or use LiveKit plugins: livekit-plugins-elevenlabs
+     [ ] Update docker-compose.yaml:
+         - Add ELEVENLABS_API_KEY environment variable
+         - Add ELEVENLABS_VOICE_ID environment variable
+     [ ] Modify fazle-voice/main.py:
+         - Replace openai.TTS with elevenlabs TTS plugin
+         - Configure voice settings (stability, similarity, style)
+     [ ] Test voice quality and adjust parameters
+
+  B. COQUI TTS / XTTS (Open Source — Self-Hosted)
+     ──────────────────────────────────────────────
+     Free, open-source alternative. Runs locally but requires GPU.
+
+     REQUIREMENTS:
+     [ ] GPU-enabled VPS or separate inference server
+     [ ] 15-30 seconds of reference audio (XTTS v2)
+     [ ] For fine-tuning: 2+ hours of transcribed audio
+
+     TRAINING DATA:
+     [ ] Clean WAV files (22kHz or 44.1kHz, mono)
+     [ ] Matching transcription text files
+     [ ] Speaker verification audio (10-second clip)
+
+     STEPS:
+     [ ] Deploy Coqui TTS container alongside existing stack
+     [ ] Provide reference audio for zero-shot cloning
+     [ ] Fine-tune model on Azim's voice data:
+         - Use XTTS v2 fine-tuning script
+         - Train for 100-1000 epochs depending on data quality
+     [ ] Integrate with Fazle Voice via HTTP API
+     [ ] Benchmark latency (target: <500ms for first audio chunk)
+
+  C. OPENAI CUSTOM VOICE (Future — Not Yet Available)
+     ─────────────────────────────────────────────────
+     OpenAI may offer custom voice cloning in their TTS API.
+     [ ] Monitor OpenAI announcements for custom voice feature
+     [ ] When available: simplest integration path (already using OpenAI TTS)
+
+  D. MICROSOFT AZURE CUSTOM NEURAL VOICE
+     ────────────────────────────────────
+     Enterprise-grade voice cloning with high quality.
+
+     REQUIREMENTS:
+     [ ] Azure subscription with Speech Services
+     [ ] 300+ utterances (approximately 30 minutes of audio)
+     [ ] Professional recording quality recommended
+     [ ] Microsoft reviews and approves voice use (compliance check)
+
+     STEPS:
+     [ ] Apply for Custom Neural Voice access on Azure
+     [ ] Record and upload training audio
+     [ ] Train custom voice model
+     [ ] Deploy voice model endpoint
+     [ ] Integrate via azure-cognitiveservices-speech SDK
+
+  E. VOICE DATA COLLECTION PLAN
+     ──────────────────────────
+     Regardless of chosen platform, these recordings are needed:
+
+     MANDATORY RECORDINGS (Priority 1):
+     [ ] Business greetings and sign-offs (5 minutes)
+     [ ] Scheduling and calendar responses (5 minutes)
+     [ ] Information queries and answers (5 minutes)
+     [ ] Task acknowledgment phrases (3 minutes)
+     [ ] Clarification questions (3 minutes)
+     [ ] Common filler words and transitions (2 minutes)
+
+     RECOMMENDED RECORDINGS (Priority 2):
+     [ ] Family greetings — wife, children, parents (5 minutes each)
+     [ ] Emotional range — happy, serious, concerned (5 minutes each)
+     [ ] Technical discussion samples (10 minutes)
+     [ ] Business meeting dialogue (10 minutes)
+     [ ] Reading passages for intonation capture (10 minutes)
+
+     ADVANCED RECORDINGS (Priority 3):
+     [ ] Bengali language samples (10 minutes)
+     [ ] Whispered/quiet speech samples (3 minutes)
+     [ ] Phone-quality recordings (3 minutes)
+     [ ] Background noise robustness samples (3 minutes)
+
+  F. VOICE QUALITY ASSURANCE
+     ───────────────────────
+     [ ] Implement voice quality scoring metrics:
+         - MOS (Mean Opinion Score) — subjective quality
+         - Speaker similarity score — compared to reference
+         - Intelligibility test — word error rate
+     [ ] Build A/B testing for voice quality:
+         - OpenAI generic vs. cloned voice
+         - Different cloning providers
+     [ ] Create voice consistency benchmarks across sessions
+     [ ] Test voice under different network conditions (latency, jitter)
+     [ ] Verify tone consistency across emotional contexts
+
+================================================================================
+13. PRIORITIZED DEVELOPMENT ROADMAP
+================================================================================
+
+PHASE 1 — IMMEDIATE (Fix Critical Issues)
+──────────────────────────────────────────
+Priority: CRITICAL | Timeline: Next deployment
+
+  [ ] Fix gen-secrets.sh to rotate all 11 secrets
+  [ ] Deploy safety.py fail-closed fix for child accounts
+  [ ] Verify all containers running and healthy on VPS
+  [ ] Check VPS disk space and storage capacity
+  [ ] Run setup-ollama.sh if Ollama models not installed
+  [ ] Test end-to-end voice pipeline on VPS
+
+PHASE 2 — INFRASTRUCTURE HARDENING
+───────────────────────────────────
+Priority: HIGH | Timeline: Week 1-2
+
+  [ ] Set up certificate renewal monitoring
+  [ ] Configure disk usage alerts (80%/90% thresholds)
+  [ ] Reduce Ollama memory when using OpenAI provider
+  [ ] Add proper healthcheck for fazle-voice container
+  [ ] Fix Coturn TLS certificate permissions
+  [ ] Set up automated backup verification
+  [ ] Implement container restart alerting
+
+PHASE 3 — VOICE QUALITY
+────────────────────────
+Priority: HIGH | Timeline: Week 2-4
+
+  [ ] Record 30+ minutes of Azim's voice samples
+  [ ] Set up ElevenLabs account and create voice clone
+  [ ] Integrate ElevenLabs TTS into Fazle Voice
+  [ ] Test cloned voice quality in live calls
+  [ ] Implement call recording to MinIO
+  [ ] Add call history and playback endpoints
+
+PHASE 4 — BEHAVIOR ENHANCEMENT
+──────────────────────────────
+Priority: MEDIUM | Timeline: Week 3-6
+
+  [ ] Refine persona prompts with few-shot examples
+  [ ] Implement episodic memory (conversation summaries)
+  [ ] Add temporal awareness to memories
+  [ ] Build post-call automated training pipeline
+  [ ] Implement hybrid search (vector + keyword)
+  [ ] Add memory importance scoring and decay
+  [ ] Extend conversation context beyond 24h TTL
+
+PHASE 5 — ADVANCED FEATURES
+────────────────────────────
+Priority: MEDIUM | Timeline: Week 4-8
+
+  [ ] Implement streaming LLM responses for voice
+  [ ] Add Twilio SIP integration for phone calls
+  [ ] Build Bengali language support (STT/TTS)
+  [ ] Implement sentiment analysis on incoming speech
+  [ ] Add bulk knowledge import (contacts, calendar, emails)
+  [ ] Build training analytics dashboard
+  [ ] Implement A/B testing for prompt variations
+
+PHASE 6 — SCALE & OPTIMIZE
+──────────────────────────
+Priority: LOW | Timeline: Week 6-12
+
+  [ ] Evaluate GPU VPS for local LLM inference
+  [ ] Fine-tune local model (LoRA on llama3.1)
+  [ ] Implement connection pooling for Ollama
+  [ ] Build knowledge graph alongside vector store
+  [ ] Implement multi-hop RAG reasoning
+  [ ] Add wake-word detection for hands-free voice
+  [ ] Implement PII redaction in training pipeline
+  [ ] Build comprehensive test suite (integration + e2e)
+
+================================================================================
+ END OF REPORT
+================================================================================
+ Generated: 2026-03-12
+ Next Review: Schedule after Phase 1 completion
+ Contact: azim@iamazim.com
+================================================================================
