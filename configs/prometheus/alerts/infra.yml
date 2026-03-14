@@ -1,0 +1,133 @@
+# ============================================================
+# Prometheus Alert Rules — Infrastructure
+# Phase 8: Alerting & Dashboards
+# ============================================================
+
+groups:
+  - name: disk_usage
+    interval: 60s
+    rules:
+      - alert: DiskUsageWarning
+        expr: |
+          (node_filesystem_avail_bytes{mountpoint="/",fstype!="tmpfs"}
+            / node_filesystem_size_bytes{mountpoint="/",fstype!="tmpfs"}) < 0.20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk usage above 80% on {{ $labels.instance }}"
+          description: >-
+            Filesystem {{ $labels.mountpoint }} on {{ $labels.instance }}
+            is {{ printf \"%.0f\" (mul (sub 1 $value) 100) }}% full.
+            Less than 20% free space remains.
+
+      - alert: DiskUsageCritical
+        expr: |
+          (node_filesystem_avail_bytes{mountpoint="/",fstype!="tmpfs"}
+            / node_filesystem_size_bytes{mountpoint="/",fstype!="tmpfs"}) < 0.10
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk usage above 90% on {{ $labels.instance }}"
+          description: >-
+            Filesystem {{ $labels.mountpoint }} on {{ $labels.instance }}
+            is {{ printf \"%.0f\" (mul (sub 1 $value) 100) }}% full.
+            Immediate action required.
+
+  - name: memory_usage
+    interval: 60s
+    rules:
+      - alert: HighMemoryUsage
+        expr: |
+          (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Memory usage above 90% on {{ $labels.instance }}"
+          description: >-
+            Available memory on {{ $labels.instance }} has dropped below 10%.
+            Current usage: {{ printf \"%.1f\" (mul $value 100) }}%.
+
+      - alert: CriticalMemoryUsage
+        expr: |
+          (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Memory usage above 95% on {{ $labels.instance }}"
+          description: >-
+            Memory critically low on {{ $labels.instance }}.
+            Services may begin to OOM-kill. Immediate action required.
+
+  - name: cpu_usage
+    interval: 60s
+    rules:
+      - alert: HighCPUUsage
+        expr: |
+          (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) > 0.85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU usage above 85% on {{ $labels.instance }}"
+          description: >-
+            CPU utilisation on {{ $labels.instance }} has been above 85%
+            for more than 10 minutes.
+
+  - name: container_restarts
+    interval: 60s
+    rules:
+      - alert: ContainerRestarting
+        expr: |
+          increase(container_start_time_seconds{name!=""}[15m]) > 2
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container {{ $labels.name }} is restarting"
+          description: >-
+            Container {{ $labels.name }} has restarted more than twice
+            in the last 15 minutes. This may indicate a crash-loop.
+
+      - alert: ContainerCrashLoop
+        expr: |
+          increase(container_start_time_seconds{name!=""}[1h]) > 5
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Container {{ $labels.name }} in crash-loop"
+          description: >-
+            Container {{ $labels.name }} has restarted more than 5 times
+            in the last hour. Immediate investigation required.
+
+  - name: service_availability
+    interval: 30s
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus target {{ $labels.job }} is down"
+          description: >-
+            The scrape target {{ $labels.job }} ({{ $labels.instance }})
+            has been unreachable for more than 2 minutes.
+
+  - name: prometheus_health
+    interval: 60s
+    rules:
+      - alert: PrometheusConfigReloadFailed
+        expr: prometheus_config_last_reload_successful == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus configuration reload failed"
+          description: >-
+            Prometheus failed to reload its configuration.
+            Check for YAML syntax errors in prometheus.yml or alert rules.

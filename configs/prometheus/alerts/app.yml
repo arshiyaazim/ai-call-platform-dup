@@ -1,0 +1,103 @@
+# ============================================================
+# Prometheus Alert Rules — Application Layer
+# Phase 8: Alerting & Dashboards
+# ============================================================
+
+groups:
+  - name: fazle_api
+    interval: 30s
+    rules:
+      - alert: FazleAPIDown
+        expr: up{job="fazle-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Fazle API Gateway is down"
+          description: >-
+            The Fazle API Gateway ({{ $labels.instance }}) has been
+            unreachable for more than 2 minutes.
+
+      - alert: FazleAPIHighErrorRate
+        expr: |
+          rate(http_requests_total{job="fazle-api",status=~"5.."}[5m])
+            / rate(http_requests_total{job="fazle-api"}[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Fazle API error rate above 5%"
+          description: >-
+            The Fazle API Gateway is returning HTTP 5xx errors for more
+            than 5% of requests over the last 5 minutes.
+            Current error rate: {{ printf \"%.1f\" (mul $value 100) }}%.
+
+      - alert: FazleAPISlowResponses
+        expr: |
+          histogram_quantile(0.95,
+            rate(http_request_duration_seconds_bucket{job="fazle-api"}[5m])
+          ) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Fazle API p95 latency above 2 seconds"
+          description: >-
+            The 95th-percentile response time for the Fazle API Gateway
+            has exceeded 2 seconds for more than 5 minutes.
+
+  - name: loki_health
+    interval: 60s
+    rules:
+      - alert: LokiDown
+        expr: up{job="loki"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Loki log aggregator is down"
+          description: >-
+            Loki ({{ $labels.instance }}) has been unreachable for
+            more than 2 minutes. Log ingestion will be interrupted.
+
+      - alert: LokiHighIngestionErrors
+        expr: |
+          rate(loki_ingester_chunks_flushed_total{status="failed"}[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Loki chunk flush failures are elevated"
+          description: >-
+            Loki is failing to flush log chunks to storage at a rate
+            above 0.1/s over the last 5 minutes.
+
+  - name: certificate_expiry
+    interval: 3600s
+    rules:
+      - alert: CertificateExpiringSoon
+        expr: |
+          node_textfile_scrape_error{collector="cert_expiry"} == 0
+            and cert_expiry_seconds < (14 * 24 * 3600)
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TLS certificate expires in less than 14 days"
+          description: >-
+            A TLS certificate tracked by the cert_expiry collector
+            is due to expire within 14 days. Verify that Certbot
+            auto-renewal is configured and working.
+
+      - alert: CertificateExpiringCritical
+        expr: |
+          node_textfile_scrape_error{collector="cert_expiry"} == 0
+            and cert_expiry_seconds < (3 * 24 * 3600)
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "TLS certificate expires in less than 3 days"
+          description: >-
+            A TLS certificate is expiring within 3 days.
+            Manual intervention required immediately.
