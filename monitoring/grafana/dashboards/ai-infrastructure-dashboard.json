@@ -1,0 +1,313 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "ai-infra-control-panel",
+    "title": "AI Infrastructure Control Panel",
+    "tags": ["ai", "infrastructure", "control-plane", "watchdog"],
+    "timezone": "browser",
+    "schemaVersion": 39,
+    "version": 1,
+    "refresh": "5s",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "timepicker": {
+      "refresh_intervals": ["5s", "10s", "30s", "1m", "5m"]
+    },
+    "annotations": {
+      "list": [
+        {
+          "name": "Container Restarts",
+          "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+          "enable": true,
+          "iconColor": "red",
+          "expr": "{container=~\".+\"} |~ \"(?i)restart|Restarting|restarted\"",
+          "tagKeys": "event",
+          "titleFormat": "Container Restart",
+          "textFormat": "{{__line__}}"
+        },
+        {
+          "name": "Worker Scaling Events",
+          "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+          "enable": true,
+          "iconColor": "blue",
+          "expr": "{container=\"ai-watchdog\"} |~ \"(?i)scale|scaling|replicas\"",
+          "tagKeys": "event",
+          "titleFormat": "Worker Scaling",
+          "textFormat": "{{__line__}}"
+        },
+        {
+          "name": "GitOps Deployments",
+          "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+          "enable": true,
+          "iconColor": "green",
+          "expr": "{container=\"ai-control-plane\"} |~ \"(?i)GitOps Deploy|deploy.*triggered|Deployment Complete\"",
+          "tagKeys": "event",
+          "titleFormat": "GitOps Deployment",
+          "textFormat": "{{__line__}}"
+        }
+      ]
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Container Health Overview",
+        "type": "table",
+        "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+        "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "red", "value": null },
+                { "color": "green", "value": 1 }
+              ]
+            },
+            "mappings": [
+              { "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } }, "type": "value" }
+            ]
+          },
+          "overrides": []
+        },
+        "options": {
+          "showHeader": true,
+          "sortBy": [{ "displayName": "name", "desc": false }]
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "time() - container_last_seen{name=~\".+\"}",
+            "legendFormat": "{{name}}",
+            "instant": true,
+            "format": "table"
+          }
+        ],
+        "transformations": [
+          {
+            "id": "organize",
+            "options": {
+              "excludeByName": { "Time": true, "__name__": true, "job": true, "instance": true },
+              "renameByName": { "name": "Container", "Value": "Seconds Since Last Seen" }
+            }
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "CPU Usage per Container",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+        "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "custom": {
+              "drawStyle": "line",
+              "lineWidth": 1,
+              "fillOpacity": 15,
+              "gradientMode": "scheme",
+              "showPoints": "never",
+              "stacking": { "mode": "none" }
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.5 },
+                { "color": "red", "value": 0.9 }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] },
+          "tooltip": { "mode": "multi" }
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "rate(container_cpu_usage_seconds_total{name=~\".+\"}[1m])",
+            "legendFormat": "{{name}}"
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Memory Usage — Key Services",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+        "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "bytes",
+            "custom": {
+              "drawStyle": "line",
+              "lineWidth": 1,
+              "fillOpacity": 15,
+              "gradientMode": "scheme",
+              "showPoints": "never",
+              "stacking": { "mode": "none" }
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 268435456 },
+                { "color": "red", "value": 536870912 }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] },
+          "tooltip": { "mode": "multi" }
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "container_memory_usage_bytes{name=~\"ai-watchdog|ai-control-plane|fazle-ai-fazle-workers.*|fazle-workers.*|fazle-api|fazle-brain|ollama\"}",
+            "legendFormat": "{{name}}"
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "Disk Usage",
+        "type": "gauge",
+        "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+        "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "min": 0,
+            "max": 1,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.7 },
+                { "color": "red", "value": 0.85 }
+              ]
+            }
+          },
+          "overrides": []
+        },
+        "options": {
+          "reduceOptions": { "calcs": ["lastNotNull"] },
+          "showThresholdLabels": false,
+          "showThresholdMarkers": true
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "1 - (node_filesystem_free_bytes{mountpoint=\"/\",fstype!=\"tmpfs\"} / node_filesystem_size_bytes{mountpoint=\"/\",fstype!=\"tmpfs\"})",
+            "legendFormat": "Disk Used %",
+            "instant": true
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Worker Autoscaling Events",
+        "type": "logs",
+        "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
+        "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+        "options": {
+          "showTime": true,
+          "showLabels": false,
+          "showCommonLabels": false,
+          "wrapLogMessage": true,
+          "prettifyLogMessage": false,
+          "enableLogDetails": true,
+          "sortOrder": "Descending",
+          "dedupStrategy": "none"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "{container=\"ai-watchdog\"} |~ \"(?i)scale|scaling|replicas|workers\"",
+            "maxLines": 100
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "title": "AI Repair Events",
+        "type": "logs",
+        "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
+        "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+        "options": {
+          "showTime": true,
+          "showLabels": false,
+          "showCommonLabels": false,
+          "wrapLogMessage": true,
+          "prettifyLogMessage": false,
+          "enableLogDetails": true,
+          "sortOrder": "Descending",
+          "dedupStrategy": "none"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "{container=\"ai-control-plane\"} |~ \"(?i)restart|repair|redeploy|rebuild|unhealthy\"",
+            "maxLines": 100
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "title": "GitOps Deployment Events",
+        "type": "logs",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+        "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+        "options": {
+          "showTime": true,
+          "showLabels": true,
+          "showCommonLabels": false,
+          "wrapLogMessage": true,
+          "prettifyLogMessage": false,
+          "enableLogDetails": true,
+          "sortOrder": "Descending",
+          "dedupStrategy": "none"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "{container=~\"ai-control-plane|ai-watchdog\"} |~ \"(?i)deploy|deployment|GitOps|git pull\"",
+            "maxLines": 100
+          }
+        ]
+      },
+      {
+        "id": 8,
+        "title": "AI Control Plane Activity",
+        "type": "logs",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+        "datasource": { "type": "loki", "uid": "P8E80F9AEF21F6940" },
+        "options": {
+          "showTime": true,
+          "showLabels": false,
+          "showCommonLabels": false,
+          "wrapLogMessage": true,
+          "prettifyLogMessage": false,
+          "enableLogDetails": true,
+          "sortOrder": "Descending",
+          "dedupStrategy": "none"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "expr": "{container=\"ai-control-plane\"} |~ \"(?i)Cycle|Analysis|repair|action|snapshot|report\"",
+            "maxLines": 200
+          }
+        ]
+      }
+    ]
+  },
+  "folderId": 0,
+  "overwrite": true
+}
