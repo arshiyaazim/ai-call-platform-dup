@@ -293,3 +293,312 @@ def get_all_conversations(limit: int = 50) -> list[dict]:
                 (limit,),
             )
             return [dict(r) for r in cur.fetchall()]
+
+
+def delete_conversation(conversation_id: str) -> bool:
+    """Delete a conversation and its messages. Returns True if deleted."""
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM fazle_conversations WHERE conversation_id = %s",
+                (conversation_id,),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+
+# ── Admin config tables ─────────────────────────────────────
+
+def ensure_admin_tables():
+    """Create admin config tables for agents, plugins, tasks, persona."""
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS fazle_admin_agents (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    name VARCHAR(100) NOT NULL,
+                    model VARCHAR(100) NOT NULL DEFAULT 'gpt-4o-mini',
+                    priority INTEGER NOT NULL DEFAULT 1,
+                    description TEXT DEFAULT '',
+                    status VARCHAR(20) NOT NULL DEFAULT 'active',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+
+                CREATE TABLE IF NOT EXISTS fazle_admin_plugins (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    name VARCHAR(100) NOT NULL,
+                    description TEXT DEFAULT '',
+                    version VARCHAR(30) DEFAULT '1.0.0',
+                    status VARCHAR(20) NOT NULL DEFAULT 'enabled',
+                    manifest JSONB DEFAULT '{}',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+
+                CREATE TABLE IF NOT EXISTS fazle_admin_tasks (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    title VARCHAR(200) NOT NULL,
+                    task_type VARCHAR(50) NOT NULL DEFAULT 'reminder',
+                    schedule VARCHAR(100) DEFAULT '',
+                    scheduled_at TIMESTAMPTZ,
+                    description TEXT DEFAULT '',
+                    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+
+                CREATE TABLE IF NOT EXISTS fazle_admin_persona (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    name VARCHAR(100) NOT NULL DEFAULT 'Azim',
+                    tone TEXT DEFAULT 'Warm, caring, knowledgeable',
+                    language VARCHAR(50) DEFAULT 'English',
+                    speaking_style TEXT DEFAULT '',
+                    knowledge_notes TEXT DEFAULT '',
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT single_persona CHECK (id = 1)
+                );
+
+                INSERT INTO fazle_admin_persona (id, name, tone, language, speaking_style, knowledge_notes)
+                VALUES (1, 'Azim', 'Warm, caring, knowledgeable', 'English',
+                        'Natural conversational tone with occasional humor. Speaks like a thoughtful friend.',
+                        'Family AI assistant with deep personal knowledge.')
+                ON CONFLICT (id) DO NOTHING;
+            """)
+        conn.commit()
+    logger.info("Admin config tables ensured (agents, plugins, tasks, persona)")
+
+
+# ── Agent CRUD ──────────────────────────────────────────────
+
+def list_agents() -> list[dict]:
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM fazle_admin_agents ORDER BY priority, created_at")
+            return [dict(r) for r in cur.fetchall()]
+
+
+def get_agent(agent_id: str) -> Optional[dict]:
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM fazle_admin_agents WHERE id = %s", (agent_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def create_agent(name: str, model: str, priority: int, description: str, status: str = "active") -> dict:
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """INSERT INTO fazle_admin_agents (name, model, priority, description, status)
+                   VALUES (%s, %s, %s, %s, %s) RETURNING *""",
+                (name, model, priority, description, status),
+            )
+            conn.commit()
+            return dict(cur.fetchone())
+
+
+def update_agent(agent_id: str, **fields) -> Optional[dict]:
+    allowed = {"name", "model", "priority", "description", "status"}
+    updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+    if not updates:
+        return get_agent(agent_id)
+    set_clause = ", ".join(f"{k} = %s" for k in updates)
+    values = list(updates.values()) + [agent_id]
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"UPDATE fazle_admin_agents SET {set_clause}, updated_at = NOW() WHERE id = %s RETURNING *",
+                values,
+            )
+            conn.commit()
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def delete_agent(agent_id: str) -> bool:
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM fazle_admin_agents WHERE id = %s", (agent_id,))
+            conn.commit()
+            return cur.rowcount > 0
+
+
+# ── Plugin CRUD ─────────────────────────────────────────────
+
+def list_plugins() -> list[dict]:
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM fazle_admin_plugins ORDER BY created_at")
+            return [dict(r) for r in cur.fetchall()]
+
+
+def create_plugin(name: str, description: str, version: str, status: str = "enabled", manifest: dict = None) -> dict:
+    import json
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """INSERT INTO fazle_admin_plugins (name, description, version, status, manifest)
+                   VALUES (%s, %s, %s, %s, %s) RETURNING *""",
+                (name, description, version, status, json.dumps(manifest or {})),
+            )
+            conn.commit()
+            return dict(cur.fetchone())
+
+
+def update_plugin(plugin_id: str, **fields) -> Optional[dict]:
+    import json
+    allowed = {"name", "description", "version", "status"}
+    updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+    if "manifest" in fields and fields["manifest"] is not None:
+        updates["manifest"] = json.dumps(fields["manifest"])
+    if not updates:
+        return get_plugin(plugin_id)
+    set_clause = ", ".join(f"{k} = %s" for k in updates)
+    values = list(updates.values()) + [plugin_id]
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"UPDATE fazle_admin_plugins SET {set_clause}, updated_at = NOW() WHERE id = %s RETURNING *",
+                values,
+            )
+            conn.commit()
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def get_plugin(plugin_id: str) -> Optional[dict]:
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM fazle_admin_plugins WHERE id = %s", (plugin_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def delete_plugin(plugin_id: str) -> bool:
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM fazle_admin_plugins WHERE id = %s", (plugin_id,))
+            conn.commit()
+            return cur.rowcount > 0
+
+
+# ── Admin Task CRUD ─────────────────────────────────────────
+
+def list_admin_tasks() -> list[dict]:
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM fazle_admin_tasks ORDER BY created_at DESC")
+            return [dict(r) for r in cur.fetchall()]
+
+
+def create_admin_task(title: str, task_type: str, schedule: str = "",
+                      scheduled_at: str = None, description: str = "", status: str = "pending") -> dict:
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """INSERT INTO fazle_admin_tasks (title, task_type, schedule, scheduled_at, description, status)
+                   VALUES (%s, %s, %s, %s, %s, %s) RETURNING *""",
+                (title, task_type, schedule, scheduled_at, description, status),
+            )
+            conn.commit()
+            return dict(cur.fetchone())
+
+
+def update_admin_task(task_id: str, **fields) -> Optional[dict]:
+    allowed = {"title", "task_type", "schedule", "scheduled_at", "description", "status"}
+    updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+    if not updates:
+        return get_admin_task(task_id)
+    set_clause = ", ".join(f"{k} = %s" for k in updates)
+    values = list(updates.values()) + [task_id]
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"UPDATE fazle_admin_tasks SET {set_clause}, updated_at = NOW() WHERE id = %s RETURNING *",
+                values,
+            )
+            conn.commit()
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def get_admin_task(task_id: str) -> Optional[dict]:
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM fazle_admin_tasks WHERE id = %s", (task_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def delete_admin_task(task_id: str) -> bool:
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM fazle_admin_tasks WHERE id = %s", (task_id,))
+            conn.commit()
+            return cur.rowcount > 0
+
+
+# ── Persona ─────────────────────────────────────────────────
+
+def get_persona() -> dict:
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM fazle_admin_persona WHERE id = 1")
+            row = cur.fetchone()
+            if row:
+                return dict(row)
+            return {
+                "name": "Azim", "tone": "Warm, caring, knowledgeable",
+                "language": "English",
+                "speaking_style": "Natural conversational tone with occasional humor.",
+                "knowledge_notes": "Family AI assistant with deep personal knowledge.",
+            }
+
+
+def update_persona(**fields) -> dict:
+    allowed = {"name", "tone", "language", "speaking_style", "knowledge_notes"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return get_persona()
+    set_clause = ", ".join(f"{k} = %s" for k in updates)
+    values = list(updates.values())
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"UPDATE fazle_admin_persona SET {set_clause}, updated_at = NOW() WHERE id = 1 RETURNING *",
+                values,
+            )
+            conn.commit()
+            row = cur.fetchone()
+            return dict(row) if row else get_persona()
+
+
+# ── Dashboard stats ─────────────────────────────────────────
+
+def get_dashboard_stats() -> dict:
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM fazle_admin_agents WHERE status = 'active'")
+            active_agents = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM fazle_admin_agents")
+            total_agents = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM fazle_admin_plugins WHERE status = 'enabled'")
+            active_plugins = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM fazle_admin_tasks WHERE status IN ('pending', 'running')")
+            active_tasks = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM fazle_admin_tasks")
+            total_tasks = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM fazle_conversations")
+            total_conversations = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM fazle_users")
+            total_users = cur.fetchone()[0]
+            return {
+                "active_agents": active_agents,
+                "total_agents": total_agents,
+                "active_plugins": active_plugins,
+                "active_tasks": active_tasks,
+                "total_tasks": total_tasks,
+                "total_conversations": total_conversations,
+                "total_users": total_users,
+            }

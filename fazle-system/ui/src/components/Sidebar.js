@@ -40,13 +40,22 @@ export default function Sidebar({ activeTab, setActiveTab, user }) {
           ))}
 
           {user?.role === "admin" && (
-            <button
-              onClick={() => router.push("/admin/family")}
-              className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium text-gray-400 hover:text-gray-200 hover:bg-gray-800/50 transition-colors mt-4 border-t border-gray-800 pt-4"
-            >
-              <span className="text-lg">👨‍👩‍👧</span>
-              Family
-            </button>
+            <div className="mt-4 border-t border-gray-800 pt-4 space-y-1">
+              <button
+                onClick={() => router.push("/dashboard/fazle")}
+                className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium text-gray-400 hover:text-gray-200 hover:bg-gray-800/50 transition-colors"
+              >
+                <span className="text-lg">📊</span>
+                AI Control
+              </button>
+              <button
+                onClick={() => router.push("/admin/family")}
+                className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium text-gray-400 hover:text-gray-200 hover:bg-gray-800/50 transition-colors"
+              >
+                <span className="text-lg">👨‍👩‍👧</span>
+                Family
+              </button>
+            </div>
           )}
         </nav>
 

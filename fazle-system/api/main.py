@@ -35,8 +35,10 @@ from database import (
     get_user_by_id, list_family_members, update_user, delete_user,
     count_users, save_message, get_user_conversations,
     get_conversation_messages, get_all_conversations,
+    ensure_admin_tables,
 )
 from audit import ensure_audit_table, log_action, get_audit_logs
+from admin_routes import router as admin_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("fazle-api")
@@ -87,6 +89,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Include admin routes
+app.include_router(admin_router)
+
 
 async def verify_api_key(x_api_key: Optional[str] = Header(None)):
     if not settings.api_key or settings.api_key == "":
@@ -127,6 +132,7 @@ def startup():
     try:
         ensure_users_table()
         ensure_audit_table()
+        ensure_admin_tables()
         logger.info("Database tables ensured on startup")
     except Exception as e:
         logger.error(f"Failed to ensure database tables: {e}")
@@ -391,6 +397,43 @@ async def delete_memory(memory_id: str, auth_user: dict = Depends(verify_auth)):
         except httpx.HTTPError as e:
             logger.error(f"Memory service error: {e}")
             raise HTTPException(status_code=502, detail="Memory service unavailable")
+
+
+@app.put("/fazle/memory/{memory_id}")
+async def update_memory(memory_id: str, body: dict, auth_user: dict = Depends(verify_auth)):
+    """Update a memory record via the memory service."""
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            resp = await client.put(
+                f"{settings.memory_url}/memories/{memory_id}",
+                json=body,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Memory update error: {e}")
+            raise HTTPException(status_code=502, detail="Memory service unavailable")
+
+
+@app.patch("/fazle/memory/{memory_id}/lock")
+async def toggle_memory_lock(memory_id: str, auth_user: dict = Depends(verify_auth)):
+    """Toggle lock status on a memory record."""
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            resp = await client.patch(
+                f"{settings.memory_url}/memories/{memory_id}/lock",
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Memory lock toggle error: {e}")
+            raise HTTPException(status_code=502, detail="Memory service unavailable")
+
+
+@app.get("/fazle/health")
+async def fazle_health():
+    """Health check alias under /fazle/ prefix."""
+    return {"status": "healthy", "service": "fazle-api", "timestamp": datetime.utcnow().isoformat()}
 
 
 # ── Multimodal memory search proxy ──────────────────────────
