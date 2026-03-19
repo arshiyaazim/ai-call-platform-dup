@@ -1,0 +1,8 @@
+{
+  "name": "Fazle AI",
+  "short_name": "Fazle",
+  "start_url": "/dashboard/fazle",
+  "display": "standalone",
+  "background_color": "#0a0a0a",
+  "theme_color": "#3b82f6"
+}

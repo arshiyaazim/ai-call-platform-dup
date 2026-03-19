@@ -315,9 +315,9 @@ services:
       - app-network
       - ai-network
 
-  # ── Fazle UI — Next.js Dashboard ──────────────────────────
+  # ── Fazle UI — Next.js Control Dashboard ───────────────────
   fazle-ui:
-    build: ../fazle-system/ui
+    build: ../frontend/fazle-dashboard
     container_name: fazle-ui
     restart: unless-stopped
     environment:
