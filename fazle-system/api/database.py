@@ -692,16 +692,21 @@ def ensure_gdpr_tables():
                 CREATE TABLE IF NOT EXISTS gdpr_requests (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     user_id UUID,
-                    request_type VARCHAR(20) NOT NULL,
-                    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                    request_type VARCHAR(30) NOT NULL,
+                    status VARCHAR(30) NOT NULL DEFAULT 'pending',
                     confirmation_code VARCHAR(64),
                     fb_user_id VARCHAR(100),
                     deleted_tables TEXT DEFAULT '',
+                    error_message TEXT DEFAULT '',
+                    retry_count INTEGER DEFAULT 0,
+                    encryption_key_hint VARCHAR(16) DEFAULT '',
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    completed_at TIMESTAMPTZ
+                    completed_at TIMESTAMPTZ,
+                    scheduled_at TIMESTAMPTZ
                 );
                 CREATE INDEX IF NOT EXISTS idx_gdpr_req_user ON gdpr_requests (user_id);
                 CREATE INDEX IF NOT EXISTS idx_gdpr_req_code ON gdpr_requests (confirmation_code);
+                CREATE INDEX IF NOT EXISTS idx_gdpr_req_status ON gdpr_requests (status);
 
                 CREATE TABLE IF NOT EXISTS gdpr_audit_logs (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -720,13 +725,33 @@ def ensure_gdpr_tables():
                     accepted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     UNIQUE(user_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS user_identities (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id UUID NOT NULL REFERENCES fazle_users(id) ON DELETE CASCADE,
+                    email VARCHAR(255),
+                    facebook_id VARCHAR(100),
+                    whatsapp_id VARCHAR(100),
+                    phone_number VARCHAR(30),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE(user_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_identity_fb ON user_identities (facebook_id);
+                CREATE INDEX IF NOT EXISTS idx_identity_wa ON user_identities (whatsapp_id);
+                CREATE INDEX IF NOT EXISTS idx_identity_phone ON user_identities (phone_number);
             """)
             # Add columns if missing (for upgrades from old schema)
-            for col, typ in [
+            gdpr_cols = [
                 ("confirmation_code", "VARCHAR(64)"),
                 ("fb_user_id", "VARCHAR(100)"),
                 ("deleted_tables", "TEXT DEFAULT ''"),
-            ]:
+                ("error_message", "TEXT DEFAULT ''"),
+                ("retry_count", "INTEGER DEFAULT 0"),
+                ("encryption_key_hint", "VARCHAR(16) DEFAULT ''"),
+                ("scheduled_at", "TIMESTAMPTZ"),
+            ]
+            for col, typ in gdpr_cols:
                 try:
                     cur.execute(
                         f"ALTER TABLE gdpr_requests ADD COLUMN IF NOT EXISTS {col} {typ}"
@@ -734,7 +759,7 @@ def ensure_gdpr_tables():
                 except Exception:
                     conn.rollback()
         conn.commit()
-    logger.info("GDPR tables ensured (gdpr_requests, gdpr_audit_logs, user_consents)")
+    logger.info("GDPR tables ensured (gdpr_requests, gdpr_audit_logs, user_consents, user_identities)")
 
 
 def create_gdpr_request(user_id: str, request_type: str) -> dict:
@@ -1005,3 +1030,225 @@ def get_gdpr_request_by_code(confirmation_code: str) -> Optional[dict]:
             )
             row = cur.fetchone()
             return dict(row) if row else None
+
+
+# ── Soft Delete ─────────────────────────────────────────────
+
+def soft_delete_user(user_id: str, delay_days: int = 7) -> dict:
+    """Mark user as pending_deletion instead of immediate delete."""
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """UPDATE fazle_users
+                   SET is_active = false,
+                       status = 'pending_deletion',
+                       deletion_scheduled_at = NOW() + INTERVAL '%s days'
+                   WHERE id = %s
+                   RETURNING id, email, status, deletion_scheduled_at""",
+                (delay_days, user_id),
+            )
+            conn.commit()
+            row = cur.fetchone()
+            return dict(row) if row else {}
+
+
+def get_users_pending_deletion() -> list[dict]:
+    """Get all users scheduled for permanent deletion whose delay has passed."""
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT id, email, status, deletion_scheduled_at
+                   FROM fazle_users
+                   WHERE status = 'pending_deletion'
+                     AND deletion_scheduled_at <= NOW()"""
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+
+def cancel_deletion(user_id: str) -> bool:
+    """Cancel pending deletion and reactivate user."""
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE fazle_users
+                   SET is_active = true, status = 'active', deletion_scheduled_at = NULL
+                   WHERE id = %s AND status = 'pending_deletion'""",
+                (user_id,),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+
+def ensure_soft_delete_columns():
+    """Add soft-delete columns to fazle_users if missing."""
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            for col, typ in [
+                ("status", "VARCHAR(30) DEFAULT 'active'"),
+                ("deletion_scheduled_at", "TIMESTAMPTZ"),
+            ]:
+                try:
+                    cur.execute(
+                        f"ALTER TABLE fazle_users ADD COLUMN IF NOT EXISTS {col} {typ}"
+                    )
+                except Exception:
+                    conn.rollback()
+        conn.commit()
+
+
+# ── User Identity Mapping ──────────────────────────────────
+
+def upsert_user_identity(
+    user_id: str,
+    email: str = None,
+    facebook_id: str = None,
+    whatsapp_id: str = None,
+    phone_number: str = None,
+) -> dict:
+    """Create or update user identity mapping."""
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """INSERT INTO user_identities (user_id, email, facebook_id, whatsapp_id, phone_number)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON CONFLICT (user_id) DO UPDATE SET
+                       email = COALESCE(EXCLUDED.email, user_identities.email),
+                       facebook_id = COALESCE(EXCLUDED.facebook_id, user_identities.facebook_id),
+                       whatsapp_id = COALESCE(EXCLUDED.whatsapp_id, user_identities.whatsapp_id),
+                       phone_number = COALESCE(EXCLUDED.phone_number, user_identities.phone_number),
+                       updated_at = NOW()
+                   RETURNING id, user_id, email, facebook_id, whatsapp_id, phone_number, updated_at""",
+                (user_id, email, facebook_id, whatsapp_id, phone_number),
+            )
+            conn.commit()
+            return dict(cur.fetchone())
+
+
+def get_user_identity(user_id: str) -> Optional[dict]:
+    """Get identity mapping for a user."""
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM user_identities WHERE user_id = %s",
+                (user_id,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def find_user_by_identity(
+    facebook_id: str = None, whatsapp_id: str = None, phone: str = None
+) -> Optional[dict]:
+    """Find a user by any identity field."""
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            conditions = []
+            params = []
+            if facebook_id:
+                conditions.append("facebook_id = %s")
+                params.append(facebook_id)
+            if whatsapp_id:
+                conditions.append("whatsapp_id = %s")
+                params.append(whatsapp_id)
+            if phone:
+                conditions.append("phone_number = %s")
+                params.append(phone)
+            if not conditions:
+                return None
+            cur.execute(
+                f"SELECT * FROM user_identities WHERE {' OR '.join(conditions)} LIMIT 1",
+                params,
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+# ── Admin GDPR Queries ─────────────────────────────────────
+
+def get_all_gdpr_requests_admin(
+    limit: int = 50, offset: int = 0, status_filter: str = None
+) -> dict:
+    """Get all GDPR requests for admin monitoring."""
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            where = ""
+            params: list = []
+            if status_filter and status_filter != "all":
+                where = "WHERE status = %s"
+                params.append(status_filter)
+
+            cur.execute(
+                f"SELECT COUNT(*) as total FROM gdpr_requests {where}", params
+            )
+            total = cur.fetchone()["total"]
+
+            cur.execute(
+                f"""SELECT id, user_id, request_type, status, confirmation_code,
+                           fb_user_id, deleted_tables, error_message, retry_count,
+                           created_at, completed_at, scheduled_at
+                    FROM gdpr_requests {where}
+                    ORDER BY created_at DESC
+                    LIMIT %s OFFSET %s""",
+                params + [limit, offset],
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+            return {"requests": rows, "total": total}
+
+
+def get_gdpr_stats() -> dict:
+    """Get aggregated GDPR statistics for admin dashboard."""
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT
+                    COUNT(*) AS total_requests,
+                    COUNT(*) FILTER (WHERE status = 'completed') AS completed,
+                    COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+                    COUNT(*) FILTER (WHERE status = 'pending' OR status = 'processing') AS pending,
+                    COUNT(*) FILTER (WHERE request_type = 'delete') AS total_deletions,
+                    COUNT(*) FILTER (WHERE request_type = 'export') AS total_exports,
+                    COUNT(*) FILTER (WHERE request_type = 'facebook_deletion') AS total_fb_deletions,
+                    AVG(EXTRACT(EPOCH FROM (completed_at - created_at)))
+                        FILTER (WHERE completed_at IS NOT NULL) AS avg_completion_secs
+                FROM gdpr_requests
+            """)
+            return dict(cur.fetchone())
+
+
+def update_gdpr_request_error(request_id: str, error: str) -> None:
+    """Store error details on a failed GDPR request."""
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE gdpr_requests
+                   SET status = 'failed', error_message = %s,
+                       retry_count = retry_count + 1, completed_at = NOW()
+                   WHERE id = %s""",
+                (error[:2000], request_id),
+            )
+            conn.commit()
+
+
+def get_failed_gdpr_requests(max_retries: int = 3) -> list[dict]:
+    """Get failed requests eligible for retry."""
+    with _get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT id, user_id, request_type, retry_count, error_message, created_at
+                   FROM gdpr_requests
+                   WHERE status = 'failed' AND retry_count < %s
+                   ORDER BY created_at ASC""",
+                (max_retries,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+
+def reset_gdpr_request_for_retry(request_id: str) -> None:
+    """Reset a failed request to pending for retry."""
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE gdpr_requests SET status = 'processing', completed_at = NULL WHERE id = %s",
+                (request_id,),
+            )
+            conn.commit()

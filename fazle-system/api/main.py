@@ -46,7 +46,7 @@ from database import (
     ensure_admin_tables, ensure_password_reset_table,
     update_user_password, create_password_reset_token,
     get_valid_reset_token, mark_reset_token_used,
-    ensure_gdpr_tables,
+    ensure_gdpr_tables, ensure_soft_delete_columns,
 )
 from audit import ensure_audit_table, log_action, get_audit_logs
 from admin_routes import router as admin_router
@@ -158,6 +158,7 @@ def startup():
         ensure_admin_tables()
         ensure_password_reset_table()
         ensure_gdpr_tables()
+        ensure_soft_delete_columns()
         logger.info("Database tables ensured on startup")
     except Exception as e:
         logger.error(f"Failed to ensure database tables: {e}")

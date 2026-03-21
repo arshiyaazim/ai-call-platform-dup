@@ -50,6 +50,7 @@ const navItems = [
   { href: '/dashboard/fazle/users', label: 'Users', icon: Users },
   { href: '/dashboard/fazle/social', label: 'Social', icon: MessageCircle },
   { href: '/dashboard/fazle/privacy', label: 'Privacy', icon: ShieldCheck },
+  { href: '/dashboard/fazle/gdpr-admin', label: 'GDPR Admin', icon: Shield },
   { href: '/dashboard/fazle/logs', label: 'Logs', icon: ScrollText },
   { href: '/dashboard/fazle/settings', label: 'Settings', icon: Settings },
 ];
