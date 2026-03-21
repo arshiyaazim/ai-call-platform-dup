@@ -221,9 +221,10 @@ function IntegrationsTab({ onMsg }: { onMsg: (text: string, type?: 'success' | '
     setSaving(platform);
     try {
       const form = platform === 'whatsapp' ? waForm : fbForm;
-      const payload: Partial<SocialIntegration> & { platform: string } = { platform };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const payload: any = { platform };
       for (const [k, v] of Object.entries(form)) {
-        if (v) (payload as Record<string, string>)[k] = v;
+        if (v) payload[k] = v;
       }
       await socialService.saveIntegration(payload);
       onMsg(`${platform} integration saved`);
