@@ -228,7 +228,7 @@ function IntegrationsTab({ onMsg }: { onMsg: (text: string, type?: 'success' | '
       for (const [k, v] of Object.entries(data)) {
         if (v) cleaned[k] = v;
       }
-      await socialService.saveIntegration(cleaned);
+      await socialService.saveIntegration(cleaned as Partial<SocialIntegration> & { platform: string });
       onMsg(`${platform} integration saved`);
       fetchIntegrations();
     } catch {
