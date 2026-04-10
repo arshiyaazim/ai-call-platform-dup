@@ -30,7 +30,12 @@ case "$TARGET" in
     stop_stack "${2:?Usage: --stack ai-infra|dograh|fazle-ai}"
     ;;
   all|"")
-    # Reverse order: fazle-ai → dograh → ai-infra
+    # Reverse order: phase5 → fazle-ai → dograh → ai-infra
+    if [ -f "$ROOT_DIR/scripts/phase5-standalone.yaml" ]; then
+      echo "── Stopping phase5 ──"
+      docker compose -f "$ROOT_DIR/scripts/phase5-standalone.yaml" --env-file "$ENV_FILE" -p "phase5" down 2>/dev/null || true
+      echo ""
+    fi
     stop_stack "fazle-ai"
     stop_stack "dograh"
     stop_stack "ai-infra"

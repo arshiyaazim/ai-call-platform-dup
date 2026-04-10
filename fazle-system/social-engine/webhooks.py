@@ -17,51 +17,16 @@ import psycopg2.extras
 
 from whatsapp import parse_incoming_message, download_media
 from facebook import parse_webhook_entry
+from redis_dedup import (
+    is_duplicate_message as _is_duplicate_message,
+    is_sender_locked as _is_sender_locked,
+    lock_sender as _lock_sender,
+    unlock_sender as _unlock_sender,
+    push_to_dlq,
+)
 import base64
 
 logger = logging.getLogger("fazle-social-engine")
-
-# ── Dedup & rate-limit state ────────────────────────────────
-_SEEN_MSG_IDS: dict[str, float] = {}      # message_id -> timestamp
-_SENDER_LOCKS: dict[str, float] = {}      # sender_id -> lock_until timestamp
-_DEDUP_TTL = 300       # ignore duplicate message_ids within 5 min
-_SENDER_COOLDOWN = 2   # seconds between replies to same sender
-
-
-def _purge_expired():
-    """Remove expired entries from dedup and rate-limit dicts."""
-    now = time.monotonic()
-    for d, ttl in [(_SEEN_MSG_IDS, _DEDUP_TTL), (_SENDER_LOCKS, _SENDER_COOLDOWN + 5)]:
-        expired = [k for k, v in d.items() if now - v > ttl]
-        for k in expired:
-            del d[k]
-
-
-def _is_duplicate_message(message_id: str) -> bool:
-    """Return True if this message_id was already processed."""
-    if not message_id:
-        return False
-    _purge_expired()
-    if message_id in _SEEN_MSG_IDS:
-        return True
-    _SEEN_MSG_IDS[message_id] = time.monotonic()
-    return False
-
-
-def _is_sender_locked(sender_id: str) -> bool:
-    """Return True if sender is still in cooldown."""
-    lock_until = _SENDER_LOCKS.get(sender_id, 0)
-    return time.monotonic() < lock_until
-
-
-def _lock_sender(sender_id: str):
-    """Lock sender for SENDER_COOLDOWN seconds."""
-    _SENDER_LOCKS[sender_id] = time.monotonic() + _SENDER_COOLDOWN
-
-
-def _unlock_sender(sender_id: str):
-    """Remove sender lock."""
-    _SENDER_LOCKS.pop(sender_id, None)
 
 
 # ── OCR: extract text from image using Tesseract ───────────
@@ -774,6 +739,11 @@ async def handle_whatsapp_webhook(
         if not ai_reply or not ai_reply.strip():
             ai_reply = "দুঃখিত, একটু সমস্যা হয়েছে। আবার বলবেন?"
             logger.warning(f"Brain returned empty for {msg['sender_id']} — using fallback")
+            push_to_dlq(
+                {"sender_id": msg["sender_id"], "text": msg["text"], "message_id": msg_id},
+                "brain_returned_empty",
+                platform="whatsapp",
+            )
 
         # Step 3: Send the SINGLE AI reply (no ACK before it)
         # Save reply for future reuse

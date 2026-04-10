@@ -66,7 +66,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("fazle-api")
 
 # Allowed file extensions for upload
-ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".png", ".jpg", ".jpeg", ".gif"}
+ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".png", ".jpg", ".jpeg", ".gif", ".wav", ".mp3", ".ogg", ".m4a", ".webm"}
 
 # Audio extensions for voice cloning
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".ogg", ".m4a", ".webm"}
@@ -918,6 +918,34 @@ async def upload_file(
     user_id = str(auth_user["id"]) if isinstance(auth_user, dict) and auth_user.get("id") != "api-key" else None
     user_name = auth_user.get("name", "Azim") if isinstance(auth_user, dict) else "Azim"
     is_image = ext in IMAGE_EXTENSIONS
+    is_audio = ext in AUDIO_EXTENSIONS
+
+    if is_audio:
+        # ── Audio pipeline: Whisper transcription → return transcript ──
+        transcript = ""
+        mime_map = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".ogg": "audio/ogg", ".m4a": "audio/mp4", ".webm": "audio/webm"}
+        audio_mime = mime_map.get(ext, "audio/webm")
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    "https://api.openai.com/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                    files={"file": (file.filename or "audio.webm", contents, audio_mime)},
+                    data={"model": "whisper-1"},
+                )
+                resp.raise_for_status()
+                transcript = resp.json().get("text", "")
+        except Exception as e:
+            logger.error(f"Whisper transcription failed: {e}")
+
+        return {
+            "status": "uploaded",
+            "filename": file.filename,
+            "size": len(contents),
+            "type": ext,
+            "text_extracted": bool(transcript.strip()),
+            "transcript": transcript,
+        }
 
     if is_image:
         # ── Image pipeline: GPT-4o caption → thumbnail → MinIO → multimodal store ──
@@ -1778,3 +1806,163 @@ async def marketplace_remove(tool_name: str, user: dict = Depends(require_admin)
         except httpx.HTTPError as e:
             logger.error(f"Marketplace remove error: {e}")
             return {"status": "fallback", "reply": "দুঃখিত, একটু সমস্যা হচ্ছে। আবার চেষ্টা করুন।"}
+
+
+# ── Contact Management proxy ────────────────────────────────
+
+@app.get("/fazle/contacts", dependencies=[Depends(verify_auth)])
+async def proxy_list_contacts(role: str = None, platform: str = "whatsapp"):
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            params = {"platform": platform}
+            if role:
+                params["role"] = role
+            resp = await client.get(f"{settings.brain_url}/contacts", params=params)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error(f"List contacts error: {e}")
+            return {"contacts": []}
+
+
+@app.post("/fazle/contacts/role")
+async def proxy_set_contact_role(body: dict, admin: dict = Depends(require_admin)):
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            resp = await client.post(f"{settings.brain_url}/contacts/role", json=body)
+            resp.raise_for_status()
+            log_action(admin, "set_contact_role", target_type="contact", detail=body.get("phone", ""))
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Set contact role error: {e}")
+            return {"status": "fallback"}
+
+
+@app.post("/fazle/contacts/language")
+async def proxy_set_contact_language(body: dict, admin: dict = Depends(require_admin)):
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            resp = await client.post(f"{settings.brain_url}/contacts/language", json=body)
+            resp.raise_for_status()
+            log_action(admin, "set_contact_language", target_type="contact",
+                       detail=f"{body.get('phone', '')} -> {body.get('language', '')}")
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Set contact language error: {e}")
+            return {"status": "fallback"}
+
+
+@app.get("/fazle/contacts/{phone}")
+async def proxy_get_contact(phone: str, platform: str = "whatsapp", auth_user: dict = Depends(verify_auth)):
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            resp = await client.get(f"{settings.brain_url}/contacts/{phone}", params={"platform": platform})
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Get contact error: {e}")
+            return {"contact": None}
+
+
+# ── Knowledge Lifecycle proxy ────────────────────────────────
+
+@app.get("/fazle/knowledge/active", dependencies=[Depends(verify_auth)])
+async def proxy_knowledge_active(category: str = None):
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            params = {}
+            if category:
+                params["category"] = category
+            resp = await client.get(f"{settings.brain_url}/knowledge/active", params=params)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Knowledge active error: {e}")
+            return {"items": []}
+
+
+@app.get("/fazle/knowledge/search", dependencies=[Depends(verify_auth)])
+async def proxy_knowledge_search(q: str = "", category: str = None):
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            params = {"q": q}
+            if category:
+                params["category"] = category
+            resp = await client.get(f"{settings.brain_url}/knowledge/search", params=params)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Knowledge search error: {e}")
+            return {"items": []}
+
+
+@app.get("/fazle/knowledge/history", dependencies=[Depends(verify_auth)])
+async def proxy_knowledge_history(key: str = "", limit: int = 50):
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            resp = await client.get(f"{settings.brain_url}/knowledge/history", params={"key": key, "limit": limit})
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Knowledge history error: {e}")
+            return {"items": []}
+
+
+@app.post("/fazle/knowledge/create")
+async def proxy_knowledge_create(body: dict, admin: dict = Depends(require_admin)):
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            resp = await client.post(f"{settings.brain_url}/knowledge/create", json=body)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Knowledge create error: {e}")
+            return {"status": "error"}
+
+
+@app.post("/fazle/knowledge/deprecate")
+async def proxy_knowledge_deprecate(body: dict, admin: dict = Depends(require_admin)):
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            resp = await client.post(f"{settings.brain_url}/knowledge/deprecate", json=body)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Knowledge deprecate error: {e}")
+            return {"status": "error"}
+
+
+@app.post("/fazle/knowledge/archive")
+async def proxy_knowledge_archive(body: dict, admin: dict = Depends(require_admin)):
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            resp = await client.post(f"{settings.brain_url}/knowledge/archive", json=body)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Knowledge archive error: {e}")
+            return {"status": "error"}
+
+
+@app.post("/fazle/knowledge/replace")
+async def proxy_knowledge_replace(body: dict, admin: dict = Depends(require_admin)):
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            resp = await client.post(f"{settings.brain_url}/knowledge/replace", json=body)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Knowledge replace error: {e}")
+            return {"status": "error"}
+
+
+@app.post("/fazle/knowledge/merge")
+async def proxy_knowledge_merge(body: dict, admin: dict = Depends(require_admin)):
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            resp = await client.post(f"{settings.brain_url}/knowledge/merge", json=body)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Knowledge merge error: {e}")
+            return {"status": "error"}

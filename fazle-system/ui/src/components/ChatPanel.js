@@ -220,14 +220,76 @@ export default function ChatPanel() {
       mediaRecorderRef.current = mediaRecorder;
       chunksRef.current = [];
       mediaRecorder.ondataavailable = (e) => chunksRef.current.push(e.data);
-      mediaRecorder.onstop = () => {
+      mediaRecorder.onstop = async () => {
         stream.getTracks().forEach((t) => t.stop());
         const blob = new Blob(chunksRef.current, { type: "audio/webm" });
-        // For now, show a transcription placeholder
+        const sizeKB = (blob.size / 1024).toFixed(0);
         setMessages((prev) => [
           ...prev,
-          { role: "user", content: `🎙️ Voice message recorded (${(blob.size / 1024).toFixed(0)}KB)` },
+          { role: "user", content: `🎙️ Transcribing voice message (${sizeKB}KB)...` },
         ]);
+        setLoading(true);
+        try {
+          const formData = new FormData();
+          formData.append("file", blob, "voice_message.webm");
+          const headers = session?.accessToken ? { Authorization: `Bearer ${session.accessToken}` } : {};
+          const res = await fetch("/api/fazle/files/upload", {
+            method: "POST",
+            headers,
+            body: formData,
+          });
+          if (!res.ok) throw new Error("Transcription failed");
+          const data = await res.json();
+          const transcript = data.transcript || "";
+          if (transcript) {
+            setMessages((prev) => {
+              const updated = [...prev];
+              updated[updated.length - 1] = { role: "user", content: `🎙️ "${transcript}"` };
+              return updated;
+            });
+            // Send transcript as a chat message
+            const chatRes = await fetch("/api/fazle/chat", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                ...(session?.accessToken ? { Authorization: `Bearer ${session.accessToken}` } : {}),
+              },
+              body: JSON.stringify({
+                message: transcript,
+                conversation_id: conversationId,
+                user: session?.user?.name || "User",
+              }),
+            });
+            if (chatRes.ok) {
+              const chatData = await chatRes.json();
+              setConversationId(chatData.conversation_id);
+              setMessages((prev) => [
+                ...prev,
+                { role: "assistant", content: chatData.reply },
+              ]);
+            }
+          } else {
+            setMessages((prev) => {
+              const updated = [...prev];
+              updated[updated.length - 1] = {
+                role: "user",
+                content: `🎙️ Voice message (${sizeKB}KB) — could not transcribe. Try again?`,
+              };
+              return updated;
+            });
+          }
+        } catch {
+          setMessages((prev) => {
+            const updated = [...prev];
+            updated[updated.length - 1] = {
+              role: "user",
+              content: `🎙️ Voice message (${sizeKB}KB) — transcription failed`,
+            };
+            return updated;
+          });
+        } finally {
+          setLoading(false);
+        }
       };
       mediaRecorder.start();
       setIsRecording(true);

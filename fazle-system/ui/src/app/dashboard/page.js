@@ -10,6 +10,7 @@ import MemoryPanel from "../../components/MemoryPanel";
 import TasksPanel from "../../components/TasksPanel";
 import KnowledgePanel from "../../components/KnowledgePanel";
 import VoicePanel from "../../components/VoicePanel";
+import ContactsPanel from "../../components/ContactsPanel";
 
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState("chat");
@@ -38,6 +39,7 @@ export default function Dashboard() {
     memory: <MemoryPanel />,
     tasks: <TasksPanel />,
     knowledge: <KnowledgePanel />,
+    contacts: <ContactsPanel />,
   };
 
   return (

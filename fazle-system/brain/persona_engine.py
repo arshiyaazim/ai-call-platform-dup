@@ -85,7 +85,39 @@ def _get_user_rules_prompt(contact_id: str, platform: str = "whatsapp") -> str:
     except Exception as e:
         logger.debug("User rules unavailable for %s: %s", contact_id, e)
         return ""
-    return _redis
+
+
+def _get_playbook_prompt(role: str) -> str:
+    """Get role-based response playbook prompt block."""
+    if not role:
+        role = "unknown"
+    try:
+        from owner_control.response_playbooks import build_playbook_prompt
+        return build_playbook_prompt(role)
+    except Exception as e:
+        logger.debug("Playbook unavailable for %s: %s", role, e)
+        return ""
+
+
+def _get_language_prompt(contact_id: str) -> str:
+    """Get per-contact language override prompt."""
+    if not contact_id:
+        return ""
+    try:
+        from owner_control.owner_policy import OwnerPolicyEngine
+        engine = OwnerPolicyEngine(dsn=DATABASE_URL)
+        lang = engine.get_effective_language(contact_id)
+        if lang and lang != "bn":
+            return (
+                f"\n--- LANGUAGE OVERRIDE ---\n"
+                f"This contact prefers: {lang}\n"
+                f"Respond primarily in {lang}. Mix Bangla only if the contact uses it.\n"
+                f"--- END LANGUAGE OVERRIDE ---"
+            )
+        return ""
+    except Exception as e:
+        logger.debug("Language override unavailable for %s: %s", contact_id, e)
+        return ""
 
 
 def build_identity_context() -> str:
@@ -391,6 +423,17 @@ def build_system_prompt(
         rules_prompt = _get_user_rules_prompt(contact_id)
         if rules_prompt:
             parts.append(rules_prompt)
+
+    # ── Phase 3: Inject role-based response playbook ──
+    effective_role = (contact_data or {}).get("relation", "unknown").lower() if contact_data else "unknown"
+    playbook_prompt = _get_playbook_prompt(effective_role)
+    if playbook_prompt:
+        parts.append(playbook_prompt)
+
+    # ── Phase 3: Inject per-contact language override ──
+    lang_prompt = _get_language_prompt(contact_id)
+    if lang_prompt:
+        parts.append(lang_prompt)
 
     return "\n".join(parts)
 

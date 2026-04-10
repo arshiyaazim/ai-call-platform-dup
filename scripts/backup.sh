@@ -88,7 +88,11 @@ echo "  ✓ Saved bucket listing + metadata"
 # ── Docker Compose config snapshot ──────────────────────────
 STEP=$((STEP + 1))
 echo "[$STEP/$TOTAL] Saving compose + config snapshots..."
-cp "$PROJECT_DIR/docker-compose.yaml" "$BACKUP_DIR/docker-compose-$TIMESTAMP.yaml"
+for compose in ai-infra/docker-compose.yaml dograh/docker-compose.yaml fazle-ai/docker-compose.yaml scripts/phase5-standalone.yaml; do
+    if [ -f "$PROJECT_DIR/$compose" ]; then
+        cp "$PROJECT_DIR/$compose" "$BACKUP_DIR/$(echo "$compose" | tr '/' '-')-$TIMESTAMP.yaml"
+    fi
+done
 if [ -f "$PROJECT_DIR/.env" ]; then
     cp "$PROJECT_DIR/.env" "$BACKUP_DIR/env-$TIMESTAMP.bak"
     chmod 600 "$BACKUP_DIR/env-$TIMESTAMP.bak"

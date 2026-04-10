@@ -78,8 +78,15 @@ REMOTE
 echo ""
 
 # ── Step 5: Validate config on VPS ─────────────────────────
-echo "[5/6] Validating docker-compose on VPS..."
-ssh "${VPS_USER}@${VPS_IP}" "cd ${VPS_DIR} && docker compose config -q && echo '  ✓ Compose config valid'"
+echo "[5/6] Validating split-stack compose files on VPS..."
+ssh "${VPS_USER}@${VPS_IP}" << 'REMOTE'
+  set -e
+  cd ~/ai-call-platform
+  for compose in ai-infra/docker-compose.yaml dograh/docker-compose.yaml fazle-ai/docker-compose.yaml scripts/phase5-standalone.yaml; do
+      docker compose -f "$compose" --env-file .env config -q
+      echo "  ✓ $compose valid"
+  done
+REMOTE
 echo ""
 
 # ── Step 6: Rebuild and restart ────────────────────────────
@@ -93,14 +100,17 @@ ssh "${VPS_USER}@${VPS_IP}" << 'REMOTE'
   cd ~/ai-call-platform
 
   # Pull new images for pinned services
-  docker compose pull 2>/dev/null || true
+  docker compose -f ai-infra/docker-compose.yaml --env-file .env pull 2>/dev/null || true
+  docker compose -f dograh/docker-compose.yaml    --env-file .env pull 2>/dev/null || true
 
   # Rebuild Fazle services (custom Dockerfiles)
-  docker compose build --no-cache fazle-api fazle-brain fazle-memory \
-    fazle-task-engine fazle-web-intelligence fazle-trainer fazle-ui
+  docker compose -f fazle-ai/docker-compose.yaml --env-file .env build --no-cache
 
-  # Rolling restart — infrastructure first, then app services
-  docker compose up -d --remove-orphans
+  # Start stacks in order — infrastructure first, then app services
+  docker compose -f ai-infra/docker-compose.yaml  --env-file .env up -d --remove-orphans
+  docker compose -f dograh/docker-compose.yaml     --env-file .env up -d --remove-orphans
+  docker compose -f fazle-ai/docker-compose.yaml   --env-file .env up -d --remove-orphans
+  docker compose -f scripts/phase5-standalone.yaml --env-file .env up -d --remove-orphans 2>/dev/null || true
 
   echo ""
   echo "  ✓ Services restarted"

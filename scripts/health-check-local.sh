@@ -32,7 +32,10 @@ echo ""
 # ── Required Files ──────────────────────────────────────────
 echo -e "${CYAN}── Required Files ──${NC}"
 REQUIRED_FILES=(
-    "docker-compose.yaml"
+    "ai-infra/docker-compose.yaml"
+    "dograh/docker-compose.yaml"
+    "fazle-ai/docker-compose.yaml"
+    "scripts/phase5-standalone.yaml"
     ".env"
     "configs/nginx/iamazim.com.conf"
     "configs/nginx/api.iamazim.com.conf"
@@ -68,11 +71,13 @@ echo ""
 # ── Docker Compose Validation ──────────────────────────────
 echo -e "${CYAN}── Docker Compose ──${NC}"
 if command -v docker >/dev/null 2>&1; then
-    if docker compose -f "$PROJECT_DIR/docker-compose.yaml" config --quiet 2>/dev/null; then
-        pass "docker-compose.yaml — valid"
-    else
-        fail "docker-compose.yaml — invalid"
-    fi
+    for compose in ai-infra/docker-compose.yaml dograh/docker-compose.yaml fazle-ai/docker-compose.yaml scripts/phase5-standalone.yaml; do
+        if docker compose -f "$PROJECT_DIR/$compose" --env-file "$PROJECT_DIR/.env" config --quiet 2>/dev/null; then
+            pass "$compose — valid"
+        else
+            fail "$compose — invalid"
+        fi
+    done
 else
     warn "Docker not available locally — skipping compose validation"
 fi
@@ -104,7 +109,10 @@ echo ""
 
 # ── Image Version Pinning ──────────────────────────────────
 echo -e "${CYAN}── Image Version Pinning ──${NC}"
-LATEST_COUNT=$(grep -c ':latest' "$PROJECT_DIR/docker-compose.yaml" 2>/dev/null || echo 0)
+LATEST_COUNT=0
+for compose in ai-infra/docker-compose.yaml dograh/docker-compose.yaml fazle-ai/docker-compose.yaml scripts/phase5-standalone.yaml; do
+    LATEST_COUNT=$((LATEST_COUNT + $(grep -c ':latest' "$PROJECT_DIR/$compose" 2>/dev/null || echo 0)))
+done
 if [ "$LATEST_COUNT" -eq 0 ]; then
     pass "No :latest tags found"
 else

@@ -70,6 +70,14 @@ case "$TARGET" in
 
     # Stack 3: Fazle AI system
     start_stack "fazle-ai"
+
+    # Stack 4: Phase-5 autonomous services
+    if [ -f "$ROOT_DIR/scripts/phase5-standalone.yaml" ]; then
+      echo "── Starting phase5 ──"
+      docker compose -f "$ROOT_DIR/scripts/phase5-standalone.yaml" --env-file "$ENV_FILE" -p "phase5" up -d
+      echo ""
+    fi
+
     echo "── All stacks started ──"
     echo ""
     docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | head -40

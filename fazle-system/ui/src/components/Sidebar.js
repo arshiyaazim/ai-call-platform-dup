@@ -9,6 +9,7 @@ const tabs = [
   { id: "memory", label: "Memory", icon: "🧠" },
   { id: "tasks", label: "Tasks", icon: "📋" },
   { id: "knowledge", label: "Knowledge", icon: "📚" },
+  { id: "contacts", label: "Contacts", icon: "👥" },
 ];
 
 export default function Sidebar({ activeTab, setActiveTab, user }) {

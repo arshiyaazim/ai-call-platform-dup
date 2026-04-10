@@ -10,8 +10,36 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validate:
+    name: Validate & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate compose files
+        run: |
+          for f in ai-infra/docker-compose.yaml dograh/docker-compose.yaml fazle-ai/docker-compose.yaml scripts/phase5-standalone.yaml; do
+            echo "Validating $f..."
+            docker compose -f "$f" config -q
+          done
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        run: pip install -r requirements.txt 2>/dev/null || pip install pytest pytest-asyncio httpx
+
+      - name: Run tests
+        run: pytest
+
   deploy:
     name: Deploy to Production
+    needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -26,5 +54,7 @@ jobs:
           command_timeout: 10m
           script: |
             echo "=== GitOps Deploy triggered by GitHub Actions ==="
-            bash /home/azim/ai-call-platform/scripts/gitops-deploy.sh 2>&1
+            cd /home/azim/ai-call-platform
+            git fetch origin && git reset --hard origin/main
+            bash scripts/deploy.sh 2>&1
             echo "=== Deploy finished with exit code $? ==="

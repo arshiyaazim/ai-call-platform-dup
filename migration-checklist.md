@@ -106,8 +106,8 @@ docker inspect --format='{{.State.Health.Status}}' minio           # → healthy
 ### Step 2 — Dograh
 
 ```bash
-cd /home/azim/dograh
-docker compose -f dograh-docker-compose.yaml --env-file ../.env up -d
+cd /home/azim/ai-call-platform/dograh
+docker compose --env-file ../.env up -d
 ```
 
 **Wait for health checks:**
@@ -120,8 +120,8 @@ docker inspect --format='{{.State.Health.Status}}' dograh-ui   # → healthy
 ### Step 3 — Fazle AI
 
 ```bash
-cd /home/azim/fazle-ai
-docker compose -f fazle-docker-compose.yaml --env-file ../.env up -d
+cd /home/azim/ai-call-platform/fazle-ai
+docker compose --env-file ../.env up -d
 ```
 
 **Wait for health checks:**
@@ -251,9 +251,9 @@ If anything goes wrong, rollback to the original single compose:
 
 ```bash
 # 1. Stop all new stacks
-cd /home/azim/ai-infra  && docker compose down
-cd /home/azim/dograh    && docker compose -f dograh-docker-compose.yaml down
-cd /home/azim/fazle-ai  && docker compose -f fazle-docker-compose.yaml down
+cd /home/azim/ai-call-platform/ai-infra  && docker compose down
+cd /home/azim/ai-call-platform/dograh    && docker compose down
+cd /home/azim/ai-call-platform/fazle-ai  && docker compose down
 
 # 2. Remove external networks (they'll be recreated by the old compose)
 docker network rm app-network db-network ai-network monitoring-network 2>/dev/null || true
@@ -282,12 +282,12 @@ cd /home/azim/ai-infra && docker compose up -d
 cd /home/azim/ai-infra && docker compose down
 
 # Dograh
-cd /home/azim/dograh && docker compose -f dograh-docker-compose.yaml up -d
-cd /home/azim/dograh && docker compose -f dograh-docker-compose.yaml down
+cd /home/azim/ai-call-platform/dograh && docker compose --env-file ../.env up -d
+cd /home/azim/ai-call-platform/dograh && docker compose down
 
 # Fazle AI
-cd /home/azim/fazle-ai && docker compose -f fazle-docker-compose.yaml up -d
-cd /home/azim/fazle-ai && docker compose -f fazle-docker-compose.yaml down
+cd /home/azim/ai-call-platform/fazle-ai && docker compose --env-file ../.env up -d
+cd /home/azim/ai-call-platform/fazle-ai && docker compose down
 ```
 
 ### View Logs
@@ -295,8 +295,8 @@ cd /home/azim/fazle-ai && docker compose -f fazle-docker-compose.yaml down
 ```bash
 # By stack
 cd /home/azim/ai-infra && docker compose logs -f postgres redis
-cd /home/azim/dograh && docker compose -f dograh-docker-compose.yaml logs -f api
-cd /home/azim/fazle-ai && docker compose -f fazle-docker-compose.yaml logs -f fazle-brain
+cd /home/azim/ai-call-platform/dograh && docker compose logs -f api
+cd /home/azim/ai-call-platform/fazle-ai && docker compose logs -f fazle-brain
 
 # By container name (works from anywhere)
 docker logs -f fazle-brain
@@ -307,6 +307,6 @@ docker logs -f dograh-api
 
 ```bash
 cd /home/azim/fazle-ai
-docker compose -f fazle-docker-compose.yaml build fazle-brain
-docker compose -f fazle-docker-compose.yaml up -d fazle-brain
+docker compose --env-file ../.env build fazle-brain
+docker compose --env-file ../.env up -d fazle-brain
 ```

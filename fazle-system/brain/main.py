@@ -50,6 +50,10 @@ from memory_manager import (
 from safety import check_content
 from agents import AgentManager, AgentContext
 from agents.manager import QueryRoute
+from teaching_pipeline import UnifiedTeachingPipeline
+from owner_control.knowledge_lifecycle import KnowledgeLifecycleEngine
+from owner_control.owner_policy import OwnerPolicyEngine
+from owner_control.response_playbooks import ConfusionHandler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("fazle-brain")
@@ -112,10 +116,16 @@ Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 # ── Agent Manager (multi-agent orchestration) ───────────────
 agent_manager: AgentManager | None = None
 
+# ── Production modules (initialized at startup) ─────────────
+teaching_pipeline: UnifiedTeachingPipeline | None = None
+knowledge_lifecycle: KnowledgeLifecycleEngine | None = None
+owner_policy: OwnerPolicyEngine | None = None
+confusion_handler: ConfusionHandler | None = None
+
 
 @app.on_event("startup")
 async def init_agents():
-    global agent_manager
+    global agent_manager, teaching_pipeline, knowledge_lifecycle, owner_policy, confusion_handler
     agent_manager = AgentManager(
         ollama_url=settings.ollama_url,
         voice_fast_model=settings.voice_fast_model,
@@ -152,6 +162,20 @@ async def init_agents():
             logger.info("Seeded default owner profile (Step 1)")
     except Exception as e:
         logger.warning(f"Profile seeding failed: {e}")
+
+    # ── Initialize production modules ──
+    try:
+        _dsn = os.getenv("FAZLE_DATABASE_URL", "postgresql://postgres:postgres@postgres:5432/postgres")
+        teaching_pipeline = UnifiedTeachingPipeline(dsn=_dsn, redis_url=settings.redis_url)
+        knowledge_lifecycle = KnowledgeLifecycleEngine(dsn=_dsn)
+        knowledge_lifecycle.ensure_tables()
+        owner_policy = OwnerPolicyEngine(dsn=_dsn)
+        owner_policy.ensure_tables()
+        confusion_handler = ConfusionHandler()
+        logger.info("Production modules initialized: teaching_pipeline, knowledge_lifecycle, owner_policy, confusion_handler")
+    except Exception as e:
+        logger.warning(f"Production module init failed (non-fatal): {e}")
+
     # Start Ollama pre-warm background task
     asyncio.create_task(_ollama_prewarm_loop())
 
@@ -1529,6 +1553,19 @@ async def chat(request: ChatRequest):
         actions = []
         fallback_triggered = True
 
+    # ── Confusion Handler: detect low-confidence / unclear replies ──
+    if fallback_triggered and confusion_handler and relationship == "social":
+        try:
+            confusion_result = confusion_handler.handle_confusion(
+                message=request.message,
+                conversation_id=conversation_id,
+            )
+            if confusion_result.get("reply"):
+                reply = confusion_result["reply"]
+                logger.info(f"Confusion handler engaged: action={confusion_result.get('action')}")
+        except Exception as e:
+            logger.debug(f"Confusion handler failed: {e}")
+
     # FIX 10: Mandatory logging
     logger.info(
         f"LLM RESULT | provider={llm_provider_used} | elapsed={llm_elapsed:.2f}s | "
@@ -2110,7 +2147,20 @@ async def _execute_owner_action(action_data: dict, platform: str) -> bool:
 
 
 async def _store_owner_correction(message: str, memory_updates: list[dict]) -> None:
-    """Store an owner correction as training data."""
+    """Store an owner correction as training data via teaching pipeline + legacy stores."""
+    # Use unified teaching pipeline if available
+    if teaching_pipeline:
+        try:
+            teaching_pipeline.teach_from_correction(
+                correction_text=message,
+                original_query="",
+                original_reply="",
+                platform="whatsapp",
+            )
+            logger.info("Owner correction stored via teaching pipeline")
+        except Exception as e:
+            logger.warning(f"Teaching pipeline correction failed: {e}")
+
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             # Store in learning engine
@@ -3124,6 +3174,117 @@ async def kg_update(conversation_id: str, text: str, user_id: Optional[str] = No
             return {"error": "Knowledge graph update failed"}
 
 
+# ── Contact Management API ──────────────────────────────────────
+
+class ContactUpdateRequest(BaseModel):
+    phone: str
+    name: Optional[str] = None
+    role: Optional[str] = None
+    sub_role: Optional[str] = None
+    language_pref: Optional[str] = None
+    platform: str = "whatsapp"
+
+class ContactLanguageRequest(BaseModel):
+    phone: str
+    language: str  # "bn", "en", "mixed"
+    platform: str = "whatsapp"
+
+
+@app.get("/contacts")
+async def list_contacts(role: Optional[str] = None, platform: str = "whatsapp"):
+    """List contacts, optionally filtered by role."""
+    if not owner_policy:
+        return {"contacts": []}
+    try:
+        if role:
+            contacts = owner_policy.list_contacts_by_role(role, platform)
+        else:
+            # List all roles
+            contacts = []
+            for r in ["client", "employee", "family", "friend", "job_seeker", "unknown"]:
+                contacts.extend(owner_policy.list_contacts_by_role(r, platform))
+        return {
+            "contacts": [
+                {
+                    "id": c.id,
+                    "phone": c.phone,
+                    "name": c.name,
+                    "role": c.role,
+                    "sub_role": c.sub_role,
+                    "language_pref": c.language_pref,
+                    "platform": c.platform,
+                    "is_active": c.is_active,
+                }
+                for c in contacts
+            ]
+        }
+    except Exception as e:
+        logger.error(f"List contacts error: {e}")
+        return {"contacts": [], "error": str(e)}
+
+
+@app.post("/contacts/role")
+async def set_contact_role(request: ContactUpdateRequest):
+    """Set or update a contact's role and metadata."""
+    if not owner_policy:
+        raise HTTPException(status_code=503, detail="Owner policy not initialized")
+    try:
+        ok = owner_policy.set_contact_role(
+            phone=request.phone,
+            role=request.role or "unknown",
+            name=request.name,
+            sub_role=request.sub_role,
+            platform=request.platform,
+        )
+        if request.language_pref:
+            owner_policy.set_contact_language(request.phone, request.language_pref, request.platform)
+        return {"status": "ok" if ok else "failed"}
+    except Exception as e:
+        logger.error(f"Set contact role error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/contacts/language")
+async def set_contact_language(request: ContactLanguageRequest):
+    """Set per-contact language preference."""
+    if not owner_policy:
+        raise HTTPException(status_code=503, detail="Owner policy not initialized")
+    try:
+        ok = owner_policy.set_contact_language(request.phone, request.language, request.platform)
+        return {"status": "ok" if ok else "failed"}
+    except Exception as e:
+        logger.error(f"Set contact language error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/contacts/{phone}")
+async def get_contact(phone: str, platform: str = "whatsapp"):
+    """Get a single contact's details."""
+    if not owner_policy:
+        raise HTTPException(status_code=503, detail="Owner policy not initialized")
+    try:
+        cr = owner_policy.get_contact_role(phone, platform)
+        if not cr:
+            return {"contact": None}
+        lang = owner_policy.get_effective_language(phone, platform)
+        return {
+            "contact": {
+                "id": cr.id,
+                "phone": cr.phone,
+                "name": cr.name,
+                "role": cr.role,
+                "sub_role": cr.sub_role,
+                "language_pref": cr.language_pref,
+                "effective_language": lang,
+                "platform": cr.platform,
+                "is_active": cr.is_active,
+            }
+        }
+    except Exception as e:
+        logger.error(f"Get contact error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/knowledge-graph/stats")
 async def kg_stats():
     """Get knowledge graph statistics."""
@@ -3408,3 +3569,189 @@ async def system_status():
         "utility_routes": [r.value for r in QueryRoute],
         "timestamp": datetime.utcnow().isoformat(),
     }
+
+
+# ── Knowledge Lifecycle API ──────────────────────────────────
+
+class KnowledgeCreateRequest(BaseModel):
+    category: str
+    key: str
+    value: str
+    source: str = "manual_text"
+    language: str = "bn"
+    confidence: float = 1.0
+
+
+class KnowledgeReplaceRequest(BaseModel):
+    category: str
+    key: str
+    new_value: str
+    reason: str = ""
+
+
+class KnowledgeMergeRequest(BaseModel):
+    category: str
+    source_keys: list[str]
+    merged_key: str
+    merged_value: str
+    reason: str = ""
+
+
+@app.post("/knowledge/create")
+async def knowledge_create(req: KnowledgeCreateRequest):
+    """Create new knowledge item in the lifecycle engine."""
+    if not knowledge_lifecycle:
+        raise HTTPException(status_code=503, detail="Knowledge lifecycle not initialized")
+    item = knowledge_lifecycle.create(
+        category=req.category, key=req.key, value=req.value,
+        source=req.source, language=req.language, confidence=req.confidence,
+    )
+    if item:
+        return {"status": "created", "id": item.id, "category": item.category, "key": item.key}
+    raise HTTPException(status_code=500, detail="Failed to create knowledge")
+
+
+@app.post("/knowledge/replace")
+async def knowledge_replace(req: KnowledgeReplaceRequest):
+    """Replace existing knowledge with new value."""
+    if not knowledge_lifecycle:
+        raise HTTPException(status_code=503, detail="Knowledge lifecycle not initialized")
+    item = knowledge_lifecycle.replace(
+        category=req.category, key=req.key, new_value=req.new_value, reason=req.reason,
+    )
+    if item:
+        return {"status": "replaced", "id": item.id, "version": item.version}
+    raise HTTPException(status_code=500, detail="Failed to replace knowledge")
+
+
+@app.post("/knowledge/deprecate")
+async def knowledge_deprecate(category: str, key: str, reason: str = ""):
+    """Deprecate a knowledge item."""
+    if not knowledge_lifecycle:
+        raise HTTPException(status_code=503, detail="Knowledge lifecycle not initialized")
+    ok = knowledge_lifecycle.deprecate(category=category, key=key, reason=reason)
+    return {"status": "deprecated" if ok else "not_found"}
+
+
+@app.post("/knowledge/archive")
+async def knowledge_archive(category: str, key: str, reason: str = ""):
+    """Archive a knowledge item."""
+    if not knowledge_lifecycle:
+        raise HTTPException(status_code=503, detail="Knowledge lifecycle not initialized")
+    ok = knowledge_lifecycle.archive(category=category, key=key, reason=reason)
+    return {"status": "archived" if ok else "not_found"}
+
+
+@app.post("/knowledge/merge")
+async def knowledge_merge(req: KnowledgeMergeRequest):
+    """Merge multiple knowledge items into one."""
+    if not knowledge_lifecycle:
+        raise HTTPException(status_code=503, detail="Knowledge lifecycle not initialized")
+    item = knowledge_lifecycle.merge(
+        category=req.category, source_keys=req.source_keys,
+        merged_key=req.merged_key, merged_value=req.merged_value, reason=req.reason,
+    )
+    if item:
+        return {"status": "merged", "id": item.id}
+    raise HTTPException(status_code=500, detail="Failed to merge knowledge")
+
+
+@app.get("/knowledge/search")
+async def knowledge_search(q: str, category: str = "", limit: int = 20):
+    """Search active knowledge items."""
+    if not knowledge_lifecycle:
+        raise HTTPException(status_code=503, detail="Knowledge lifecycle not initialized")
+    items = knowledge_lifecycle.search(q, category=category or None, limit=limit)
+    return {"results": [{"id": i.id, "category": i.category, "key": i.key, "value": i.value,
+                          "version": i.version, "confidence": i.confidence, "source": i.source}
+                         for i in items]}
+
+
+@app.get("/knowledge/active")
+async def knowledge_active(category: str = "", limit: int = 50):
+    """Get all active knowledge items."""
+    if not knowledge_lifecycle:
+        raise HTTPException(status_code=503, detail="Knowledge lifecycle not initialized")
+    items = knowledge_lifecycle.get_active(category=category or None, limit=limit)
+    return {"items": [{"id": i.id, "category": i.category, "key": i.key, "value": i.value,
+                        "status": i.status.value, "version": i.version, "confidence": i.confidence,
+                        "source": i.source, "language": i.language, "created_at": i.created_at}
+                       for i in items]}
+
+
+@app.get("/knowledge/history")
+async def knowledge_history(category: str, key: str):
+    """Get version history of a knowledge item."""
+    if not knowledge_lifecycle:
+        raise HTTPException(status_code=503, detail="Knowledge lifecycle not initialized")
+    items = knowledge_lifecycle.get_history(category, key)
+    return {"history": [{"id": i.id, "value": i.value, "version": i.version,
+                          "status": i.status.value, "created_at": i.created_at}
+                         for i in items]}
+
+
+# ── Teaching API ─────────────────────────────────────────────
+
+class TeachRequest(BaseModel):
+    content: str
+    source: str = "manual_text"
+    category: str = ""
+    key: str = ""
+    language: str = "bn"
+
+
+class TeachCorrectionRequest(BaseModel):
+    correction: str
+    original_query: str = ""
+    original_reply: str = ""
+    platform: str = "web"
+
+
+@app.post("/teach")
+async def teach(req: TeachRequest):
+    """Unified teaching endpoint — accepts knowledge from any source."""
+    if not teaching_pipeline:
+        raise HTTPException(status_code=503, detail="Teaching pipeline not initialized")
+    from teaching_pipeline import TeachingInput, TeachingSource
+    source_map = {
+        "manual_text": TeachingSource.MANUAL_TEXT,
+        "web_chat": TeachingSource.WEB_CHAT,
+        "file_upload": TeachingSource.FILE_UPLOAD,
+        "audio_transcript": TeachingSource.AUDIO_TRANSCRIPT,
+        "image_ocr": TeachingSource.IMAGE_OCR,
+        "web_scrape": TeachingSource.WEB_SCRAPE,
+    }
+    result = teaching_pipeline.teach(TeachingInput(
+        content=req.content,
+        source=source_map.get(req.source, TeachingSource.MANUAL_TEXT),
+        category=req.category,
+        key=req.key,
+        language=req.language,
+    ))
+    return {"success": result.success, "knowledge_id": result.knowledge_id,
+            "approval": result.approval_status.value, "message": result.message,
+            "error": result.error}
+
+
+@app.post("/teach/correction")
+async def teach_correction(req: TeachCorrectionRequest):
+    """Teach Fazle from owner correction of AI reply."""
+    if not teaching_pipeline:
+        raise HTTPException(status_code=503, detail="Teaching pipeline not initialized")
+    result = teaching_pipeline.teach_from_correction(
+        correction_text=req.correction,
+        original_query=req.original_query,
+        original_reply=req.original_reply,
+        platform=req.platform,
+    )
+    return {"success": result.success, "knowledge_id": result.knowledge_id,
+            "message": result.message}
+
+
+@app.post("/teach/audio")
+async def teach_audio(transcript: str, confidence: float = 0.8, sender_id: str = "owner"):
+    """Teach from audio transcription."""
+    if not teaching_pipeline:
+        raise HTTPException(status_code=503, detail="Teaching pipeline not initialized")
+    result = teaching_pipeline.teach_from_audio(transcript, confidence, sender_id)
+    return {"success": result.success, "knowledge_id": result.knowledge_id}

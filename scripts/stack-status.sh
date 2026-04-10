@@ -27,6 +27,14 @@ for stack in ai-infra dograh fazle-ai; do
   echo ""
 done
 
+# Phase-5 standalone
+if [ -f "$ROOT_DIR/scripts/phase5-standalone.yaml" ]; then
+  echo "── phase5 ──"
+  docker compose -f "$ROOT_DIR/scripts/phase5-standalone.yaml" --env-file "$ENV_FILE" -p "phase5" ps \
+    --format "table {{.Name}}\t{{.Status}}\t{{.Health}}" 2>/dev/null || echo "  (not running)"
+  echo ""
+fi
+
 echo "── Docker Networks ──"
 for net in app-network db-network ai-network monitoring-network; do
   if docker network inspect "$net" >/dev/null 2>&1; then

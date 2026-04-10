@@ -491,13 +491,13 @@ cd ai-infra && docker compose up -d && cd ..
 ./scripts/db-migrate.sh
 
 # 6. Start voice platform
-cd dograh && docker compose -f dograh-docker-compose.yaml up -d && cd ..
+cd dograh && docker compose --env-file ../.env up -d && cd ..
 
 # 7. Start Fazle AI (core services)
-cd fazle-ai && docker compose -f fazle-docker-compose.yaml up -d && cd ..
+cd fazle-ai && docker compose --env-file ../.env up -d && cd ..
 
 # 8. Start Phase-5 autonomous services
-docker compose -f phase5-standalone.yaml up -d
+cd scripts && docker compose -f phase5-standalone.yaml --env-file ../.env up -d && cd ..
 
 # 9. Verify all services
 ./scripts/health-check.sh
@@ -703,7 +703,7 @@ configs/
 Additional configs:
 - `personality/personality.md` — Master personality definition
 - `personality/azim-master-persona.md` — Detailed persona rules, relationship boundaries, content safety
-- `phase5-standalone.yaml` — Docker Compose for Phase-5 autonomous services (standalone deployment)
+- `scripts/phase5-standalone.yaml` — Docker Compose for Phase-5 autonomous services (standalone deployment)
 - `db/rls/rls_policies.sql` — Row-Level Security policies
 - `db/hardening/` — Database hardening scripts
 
