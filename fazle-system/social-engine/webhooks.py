@@ -25,7 +25,7 @@ logger = logging.getLogger("fazle-social-engine")
 _SEEN_MSG_IDS: dict[str, float] = {}      # message_id -> timestamp
 _SENDER_LOCKS: dict[str, float] = {}      # sender_id -> lock_until timestamp
 _DEDUP_TTL = 300       # ignore duplicate message_ids within 5 min
-_SENDER_COOLDOWN = 10  # seconds between replies to same sender
+_SENDER_COOLDOWN = 2   # seconds between replies to same sender
 
 
 def _purge_expired():
@@ -217,7 +217,7 @@ def _handle_owner_contact_command(text: str, db_conn_fn) -> bool:
             phone, note = m.group(1), m.group(2).strip()
             try:
                 from main import upsert_contact
-                upsert_contact(db_conn_fn, phone, "", "whatsapp", note)
+                upsert_contact(db_conn_fn, phone, "", "whatsapp", notes=note)
                 logger.info(f"Owner added note for {phone}")
                 return True
             except Exception as e:

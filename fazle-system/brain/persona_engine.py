@@ -15,6 +15,13 @@ logger = logging.getLogger("fazle-brain.persona")
 LEARNING_ENGINE_URL = "http://fazle-learning-engine:8900"
 PERSONA_CACHE_TTL = int(os.getenv("PERSONA_CACHE_TTL", "300"))  # 5 min default
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/1")
+DATABASE_URL = os.getenv(
+    "FAZLE_DATABASE_URL",
+    "postgresql://postgres:postgres@postgres:5432/postgres",
+)
+
+_GOVERNANCE_CACHE_KEY = "fazle:governance:prompt_block"
+_GOVERNANCE_CACHE_TTL = 300  # 5 min
 
 # Lazy-init Redis for caching
 _redis = None
@@ -28,6 +35,56 @@ def _get_redis():
             _redis = redis_lib.Redis.from_url(REDIS_URL, decode_responses=True)
         except Exception:
             pass
+    return _redis
+
+
+# ── Governance prompt injection (Phase 2D) ───────────────────
+
+def _get_governance_prompt() -> str:
+    """Get the governance prompt block — cached in Redis for 5 minutes.
+
+    Falls back to empty string if DB or Redis unavailable (non-blocking).
+    """
+    r = _get_redis()
+    if r:
+        try:
+            cached = r.get(_GOVERNANCE_CACHE_KEY)
+            if cached:
+                return cached
+        except Exception:
+            pass
+
+    # Build from DB
+    try:
+        from owner_control.knowledge_governance import KnowledgeGovernance
+        gov = KnowledgeGovernance(DATABASE_URL)
+        prompt = gov.build_governance_prompt()
+        # Cache it
+        if r and prompt:
+            try:
+                r.setex(_GOVERNANCE_CACHE_KEY, _GOVERNANCE_CACHE_TTL, prompt)
+            except Exception:
+                pass
+        return prompt
+    except Exception as e:
+        logger.debug("Governance prompt unavailable: %s", e)
+        return ""
+
+
+def _get_user_rules_prompt(contact_id: str, platform: str = "whatsapp") -> str:
+    """Get per-contact rules prompt block.
+
+    Returns empty string if no rules or engine unavailable.
+    """
+    if not contact_id:
+        return ""
+    try:
+        from owner_control.user_rules import UserRulesEngine
+        engine = UserRulesEngine(dsn=DATABASE_URL, redis_url=REDIS_URL)
+        return engine.build_rules_prompt(contact_id, platform)
+    except Exception as e:
+        logger.debug("User rules unavailable for %s: %s", contact_id, e)
+        return ""
     return _redis
 
 
@@ -132,7 +189,8 @@ def _build_humanization_context() -> str:
     return _HUMANIZATION_RULES
 
 
-BASE_IDENTITY = """You are Azim (Md. Muradul Alam Azim), owner of Al-Aqsa Security & Logistics Services Ltd (BD, est.2014). Ex-G4S Dubai.
+BASE_IDENTITY = """You are Azim, owner of Al-Aqsa Security & Logistics Services Ltd (BD, est.2014). Ex-G4S Dubai.
+Sister concerns: Al-Aqsa Security Service & Trading Centre, Al-Aqsa Surveillance Force.
 Contact: 01958 122300. Web: al-aqsasecurity.com
 Services: security, logistics, event security.
 RULES: You ARE Azim. Never reveal AI/bot. Bangla-first. Direct, short.
@@ -278,7 +336,7 @@ def build_system_prompt(
     """Build a relationship-aware system prompt.
 
     Args:
-        user_name: The family member's name (e.g. "Sarah")
+        user_name: The family member's name (e.g. "Sajeda Yesmin")
         relationship: Their relationship to Azim (e.g. "wife", "daughter")
         user_id: Optional user ID for context
         social_context: Optional context string (platform, intent) for social interactions
@@ -319,6 +377,20 @@ def build_system_prompt(
             f"\nPrivacy rule: Only discuss memories and information that belong to {user_name} or are shared/general. "
             f"Never reveal other family members' private conversations or personal information."
         )
+
+    # ── Phase 2D: Inject governance prompt (canonical facts + phrasing) ──
+    gov_prompt = _get_governance_prompt()
+    if gov_prompt:
+        parts.append(gov_prompt)
+
+    # ── Phase 2B: Inject per-contact rules if contact data available ──
+    contact_id = None
+    if contact_data:
+        contact_id = contact_data.get("phone") or contact_data.get("identifier")
+    if contact_id:
+        rules_prompt = _get_user_rules_prompt(contact_id)
+        if rules_prompt:
+            parts.append(rules_prompt)
 
     return "\n".join(parts)
 
@@ -784,7 +856,8 @@ def get_dynamic_greeting(relation: str) -> str:
 
 # ── Owner Conversational Control System ─────────────────────
 
-OWNER_SYSTEM_PROMPT = """You are Fazle — Azim's AI operation manager for আল-আকসা সিকিউরিটি সার্ভিস (Al-Aqsa Security Service & Trading Centre).
+OWNER_SYSTEM_PROMPT = """You are Fazle — Azim's AI operation manager for আল-আকসা সিকিউরিটি অ্যান্ড লজিস্টিকস সার্ভিসেস লিমিটেড (Al-Aqsa Security & Logistics Services Ltd).
+Sister concerns: Al-Aqsa Security Service & Trading Centre, Al-Aqsa Surveillance Force.
 You are talking DIRECTLY to Azim, your owner and boss.
 
 🎯 MODE: OWNER CONVERSATION — OPERATION MANAGER
@@ -794,9 +867,12 @@ You are the digital operation manager of a real security and manpower supply com
 🏢 COMPANY CONTEXT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-কোম্পানির নাম: আল-আকসা সিকিউরিটি সার্ভিস অ্যান্ড ট্রেডিং সেন্টার
+মাদার কোম্পানি: আল-আকসা সিকিউরিটি অ্যান্ড লজিস্টিকস সার্ভিসেস লিমিটেড
+সিস্টার কনসার্ন: ১. আল-আকসা সিকিউরিটি সার্ভিস অ্যান্ড ট্রেডিং সেন্টার ২. আল-আকসা সার্ভেইল্যান্স ফোর্স
 ধরন: Security Service + Manpower Supply
-প্রধান কার্যালয়: ভিক্টোরিয়া গেইট, একে খান মোড়, পাহাড়তলী, চট্টগ্রাম
+কর্পোরেট অফিস: শাহ আলম মার্কেট, পিসি রোড, নিমতলা, বন্দর – ৪১০০, চট্টগ্রাম
+রিক্রুটমেন্ট ও ট্রেনিং সেন্টার: ভিক্টোরিয়া গেইট, একে খান মোড়, পাহাড়তলী, চট্টগ্রাম
+জোনাল অফিস: ইস্পাহানি কন্টেইনার ডিপো গেইট ১, খোকনের বিল্ডিং, একে খান মোড়, পাহাড়তলী, চট্টগ্রাম
 অফিস সময়: সকাল ৯টা – বিকাল ৫টা
 
 📞 যোগাযোগ:
@@ -827,12 +903,12 @@ You are the digital operation manager of a real security and manpower supply com
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 সার্ভে স্কট (Survey Scout):
-- প্রশিক্ষণকাল (৪৫ দিন): ১০,০০০ – ১৫,০০০ টাকা
+- প্রশিক্ষণকাল (৪৫–৯০ দিন): ১২,০০০ – ১৫,০০০ টাকা
 - প্রবেশন শেষে: ১২,০০০ – ১৮,০০০ টাকা
 - ভবিষ্যতে বেতন বৃদ্ধি ও অফিসিয়াল চাকরির সুযোগ
 - থাকা: জাহাজে ফ্রি
 - খাওয়া: নিজ দায়িত্বে
-- ডিউটি: গড়ে ৬–৮ ঘণ্টা
+- ডিউটি: ৮ ঘণ্টা শিফটে, দিনে ৩ শিফট ৩ জনে
 
 সিকিউরিটি গার্ড:
 - বেতন ক্লায়েন্ট চুক্তি অনুযায়ী (আলোচনা সাপেক্ষ)
@@ -848,7 +924,7 @@ You are the digital operation manager of a real security and manpower supply com
 
 ধাপ ১: আগ্রহী ব্যক্তি WhatsApp-এ যোগাযোগ → তথ্য সংগ্রহ (নাম, বয়স, শিক্ষা, ঠিকানা)
 ধাপ ২: অফিসে আসা → ডকুমেন্ট ভেরিফিকেশন (ছবি, NID/জন্ম নিবন্ধন)
-ধাপ ৩: জয়েনিং → ট্রেনিং শুরু (৪৫ দিন)
+ধাপ ৩: জয়েনিং → ট্রেনিং শুরু (৪৫–৯০ দিন)
 
 প্রয়োজনীয় ডকুমেন্ট:
 - ছবি (সাম্প্রতিক)

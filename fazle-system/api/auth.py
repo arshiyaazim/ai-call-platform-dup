@@ -2,7 +2,9 @@
 # Fazle API — JWT Authentication Utilities
 # Token creation, verification, and password hashing
 # ============================================================
+import hmac
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -51,28 +53,35 @@ def decode_access_token(token: str) -> dict:
     return jwt.decode(token, auth_settings.jwt_secret, algorithms=[ALGORITHM])
 
 
-async def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
-    """Extract and validate user from Authorization: Bearer <token> header."""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+async def get_current_user(
+    authorization: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
+) -> dict:
+    """Accept either JWT (Authorization: Bearer) or API key (X-API-Key)."""
+    # Try JWT first
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[7:]
+        try:
+            payload = decode_access_token(token)
+        except PyJWTError:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    token = authorization[7:]  # strip "Bearer "
-    try:
-        payload = decode_access_token(token)
-    except PyJWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token payload")
 
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Invalid token payload")
+        from database import get_user_by_id
+        user = get_user_by_id(user_id)
+        if not user or not user.get("is_active"):
+            raise HTTPException(status_code=401, detail="User not found or inactive")
+        return user
 
-    from database import get_user_by_id
+    # Fall back to API key
+    api_key = os.getenv("FAZLE_API_KEY", "")
+    if x_api_key and api_key and hmac.compare_digest(x_api_key.strip(), api_key.strip()):
+        return {"id": "api-key", "email": "system", "name": "API Key", "role": "admin", "relationship_to_azim": "self"}
 
-    user = get_user_by_id(user_id)
-    if not user or not user.get("is_active"):
-        raise HTTPException(status_code=401, detail="User not found or inactive")
-
-    return user
+    raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
 
 
 async def get_optional_user(authorization: Optional[str] = Header(None)) -> Optional[dict]:

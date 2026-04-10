@@ -40,6 +40,11 @@ from watchdog_routes import router as watchdog_router
 from user_routes import router as user_router
 from social_routes import router as social_router
 from gdpr_routes import router as gdpr_router
+from knowledge_routes import router as knowledge_router, ensure_knowledge_tables, seed_knowledge_data
+from lead_routes import router as lead_router, ensure_leads_table
+from governance_routes import router as governance_router, ensure_governance_tables
+from owner_query_routes import router as owner_query_router
+from user_rules_routes import router as user_rules_router, ensure_user_rules_tables
 from auth import (
     hash_password, verify_password, create_access_token,
     get_current_user, require_admin, get_optional_user,
@@ -188,6 +193,11 @@ app.include_router(watchdog_router)
 app.include_router(user_router)
 app.include_router(social_router)
 app.include_router(gdpr_router)
+app.include_router(knowledge_router)
+app.include_router(lead_router)
+app.include_router(governance_router)
+app.include_router(owner_query_router)
+app.include_router(user_rules_router)
 
 
 async def verify_api_key(x_api_key: Optional[str] = Header(None)):
@@ -291,6 +301,11 @@ def startup():
         ensure_gdpr_tables()
         ensure_soft_delete_columns()
         _ensure_voice_clones_table()
+        ensure_knowledge_tables()
+        ensure_leads_table()
+        ensure_governance_tables()
+        ensure_user_rules_tables()
+        seed_knowledge_data()
         logger.info("Database tables ensured on startup")
     except Exception as e:
         logger.error(f"Failed to ensure database tables: {e}")

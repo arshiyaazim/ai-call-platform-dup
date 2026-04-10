@@ -36,14 +36,14 @@ FAMILY = [
     {
         "email": "wife@iamazim.com",
         "password": "ChangeMe123!",
-        "name": "Sarah",
+        "name": "Sajeda Yesmin",
         "relationship_to_azim": "wife",
         "role": "member",
     },
     {
         "email": "daughter@iamazim.com",
         "password": "ChangeMe123!",
-        "name": "Aisha",
+        "name": "Arshiya Wafiqah",
         "relationship_to_azim": "daughter",
         "role": "member",
     },

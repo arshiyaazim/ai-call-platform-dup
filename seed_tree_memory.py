@@ -24,18 +24,18 @@ async def check_health():
 # ── Step 2: Seed tree knowledge ─────────────────────────────
 SEED_DATA = [
     # ── Core Identity ──
-    {"tree_path": "azim", "text": "Fazle Azim — Full name: Md. Muradul Alam Azim. Owner and operator of Al-Aqsa Security & Logistics Services Ltd. Ex-G4S Operations Manager with 5 years international experience in Dubai.", "source": "persona"},
-    {"tree_path": "azim", "text": "Fazle Azim's phone: +8801880446111. This is the owner's personal number. Always recognize this number as the boss.", "source": "persona"},
+    {"tree_path": "azim", "text": "Azim — Owner and operator of Al-Aqsa Security & Logistics Services Ltd. Ex-G4S Operations Manager with 5 years international experience in Dubai. Sister concerns: Al-Aqsa Security Service & Trading Centre, Al-Aqsa Surveillance Force.", "source": "persona"},
+    {"tree_path": "azim", "text": "Azim's owner phone is configured via SOCIAL_OWNER_PHONE env. Always recognize that number as the boss.", "source": "persona"},
 
     # ── Business / Al-Aqsa Security ──
     {"tree_path": "azim/business/al-aqsa-security", "text": "Al-Aqsa Security & Logistics Services Ltd. Established 2014, journey started 2013. Premier security provider in Bangladesh. Website: al-aqsasecurity.com. Contact: 01958 122300, 01958 122301, 01958 122302. Email: admin@al-aqsasecurity.com", "source": "persona"},
-    {"tree_path": "azim/business/al-aqsa-security/services", "text": "Al-Aqsa provides: Corporate Security (BDT 14,500/month), Residential Security (BDT 12,500/month), Hotel & Hospitality Security (BDT 12,500/month), Healthcare Facility Security (BDT 14,500/month), Logistics & Transport Security (BDT 14,500/month), Construction & Industrial Security (BDT 14,500/month), Event Security, VIP & Personal Security. All include food, accommodation, dress. 12hr duty.", "source": "persona"},
-    {"tree_path": "azim/business/al-aqsa-security/pricing", "text": "Corporate: BDT 14,500/month. Residential: BDT 12,500/month. Hotel: BDT 12,500/month. Healthcare: BDT 14,500/month. Logistics: BDT 14,500/month. Construction: BDT 14,500/month. All rates include food, accommodation, and uniform. 12-hour duty shift.", "source": "persona"},
-    {"tree_path": "azim/business/al-aqsa-security/employees", "text": "Guard requirements: Age 22-45, minimum education Grade 8+, must complete 15 days basic training. Team includes ex-military and ex-police officers. Guards are well-trained professionals.", "source": "persona"},
+    {"tree_path": "azim/business/al-aqsa-security/services", "text": "Al-Aqsa provides: Corporate Security (BDT 14,500/month), Residential Security (BDT 12,500/month), Hotel & Hospitality Security (BDT 12,500/month), Healthcare Facility Security (BDT 14,500/month), Logistics & Transport Security (BDT 14,500/month), Construction & Industrial Security (BDT 14,500/month), Event Security, VIP & Personal Security. All include food, accommodation, dress. 8hr shift-based duty, 3 shifts for 3 persons.", "source": "persona"},
+    {"tree_path": "azim/business/al-aqsa-security/pricing", "text": "Corporate: BDT 14,500/month. Residential: BDT 12,500/month. Hotel: BDT 12,500/month. Healthcare: BDT 14,500/month. Logistics: BDT 14,500/month. Construction: BDT 14,500/month. All rates include food, accommodation, and uniform. 8-hour shift-based duty.", "source": "persona"},
+    {"tree_path": "azim/business/al-aqsa-security/employees", "text": "Guard requirements: Age 22-45, minimum education Grade 8+, must complete 45-90 days training. Team includes ex-military and ex-police officers. Guards are well-trained professionals.", "source": "persona"},
     {"tree_path": "azim/business/al-aqsa-security/operations", "text": "Al-Aqsa uses technology: CCTV surveillance, biometric access control, patrol monitoring systems. The company provides container depot security, route escort, and armed security for logistics.", "source": "persona"},
 
     # ── Business / Other companies ──
-    {"tree_path": "azim/business", "text": "Fazle Azim owns multiple companies: Al-Aqsa Security & Logistics Services Ltd, Al-Aqsa Security Service, Al-Aqsa Surveillance Force, Al-Aqsa Security Service & Trading Center, Magnus Marine (magnusmarine.online).", "source": "persona"},
+    {"tree_path": "azim/business", "text": "Azim owns multiple companies: Al-Aqsa Security & Logistics Services Ltd (mother company), Al-Aqsa Security Service & Trading Centre (sister concern), Al-Aqsa Surveillance Force (sister concern), Magnus Marine (magnusmarine.online).", "source": "persona"},
     {"tree_path": "azim/business/logistics", "text": "Al-Aqsa also provides logistics services: container depot guarding, route escort, armed security for transport. Part of Al-Aqsa Security & Logistics Services Ltd.", "source": "persona"},
 
     # ── Social Media ──

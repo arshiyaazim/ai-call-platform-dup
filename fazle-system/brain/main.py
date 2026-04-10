@@ -18,6 +18,9 @@ from typing import Optional
 import os
 from datetime import datetime
 from memory_manager import conversation_get, conversation_set
+from context_builder import build_knowledge_context, detect_intents, normalize_text, KNOWLEDGE_FALLBACK_BN, get_cached_context, set_cached_context
+from intent_engine import process_social_intent, _get_state as _get_intent_state
+from lead_capture import try_capture_lead
 from persona_engine import build_system_prompt, build_system_prompt_async
 from persona_engine import (
     build_user_history_context, build_anti_repetition_context,
@@ -909,6 +912,31 @@ async def health():
     return {"status": "healthy", "service": "fazle-brain", "timestamp": datetime.utcnow().isoformat()}
 
 
+# ── Owner Control Plane Status ──────────────────────────────
+@app.get("/control-plane/status")
+async def control_plane_status():
+    """Phase 2 — return command taxonomy + capability matrix + lifecycle info."""
+    from owner_control.command_taxonomy import taxonomy_summary, OWNER_COMMANDS
+    from owner_control.capability_matrix import matrix_summary, CAPABILITIES
+    return {
+        "phase": 2,
+        "features": {
+            "1A_command_taxonomy": True,
+            "1B_knowledge_governance": True,
+            "1C_capability_matrix": True,
+            "2A_owner_query_apis": True,
+            "2B_user_rules": True,
+            "2C_knowledge_lifecycle": True,
+            "2D_governance_injection": True,
+        },
+        "taxonomy": taxonomy_summary(),
+        "capabilities": matrix_summary(),
+        "commands": {k: {"category": v.category.value, "risk": v.risk.value,
+                         "enforcement": v.enforcement.value}
+                     for k, v in OWNER_COMMANDS.items()},
+    }
+
+
 # ── Decision endpoint (called by Fazle API for Dograh) ──────
 class DecisionRequest(BaseModel):
     caller: str
@@ -1023,8 +1051,21 @@ async def chat_voice(request: VoiceChatRequest):
     # Use provided history or fetch from Redis
     history = request.history or conversation_get(conversation_id)
 
+    # ── Voice: Knowledge context injection ──
+    voice_knowledge_ctx = ""
+    try:
+        voice_knowledge_ctx = await build_knowledge_context(
+            message=request.message,
+            caller_id=user_id or voice_user_id,
+            api_url="http://fazle-api:8100",
+        )
+        if voice_knowledge_ctx:
+            logger.info(f"Voice knowledge context: {len(voice_knowledge_ctx)} chars")
+    except Exception:
+        pass
+
     # ── Voice Agent: identity enforcement via strategy ──
-    voice_system_prompt = system_prompt + memory_context + voice_history_ctx + voice_anti_rep
+    voice_system_prompt = system_prompt + voice_knowledge_ctx + memory_context + voice_history_ctx + voice_anti_rep
     if agent_manager:
         ctx = AgentContext(
             message=request.message,
@@ -1038,7 +1079,7 @@ async def chat_voice(request: VoiceChatRequest):
             domain_result = await agent_manager.process_domain(ctx)
             domain_prompt = domain_result.get("system_prompt")
             if domain_prompt:
-                voice_system_prompt = domain_prompt + memory_context + voice_history_ctx + voice_anti_rep
+                voice_system_prompt = domain_prompt + voice_knowledge_ctx + memory_context + voice_history_ctx + voice_anti_rep
             else:
                 identity_prompt = domain_result.get("identity_prompt", "")
                 if identity_prompt:
@@ -1223,6 +1264,29 @@ async def chat(request: ChatRequest):
             "presence": {"typing_delay_ms": 0, "response_delay_ms": 0, "tone_energy": "high"},
         }
 
+    # ── Phase 3: Full Intent Detection System (social only) ──
+    # 8-step flow: classify → intent match → negative filter → context → reply
+    if relationship == "social":
+        intent_reply = process_social_intent(request.message, conversation_id)
+        if intent_reply:
+            # ── Lead Capture ──
+            intent_state = _get_intent_state(conversation_id)
+            matched_intent = intent_state.get("last_intent")
+            intent_reply = await try_capture_lead(
+                request.message, matched_intent, conversation_id, intent_reply,
+            )
+            logger.info(f"Intent engine → {intent_reply[:50]} for: {request.message[:60]}")
+            return {
+                "reply": intent_reply,
+                "conversation_id": conversation_id,
+                "memory_updates": [],
+                "route": "intent_engine",
+                "presence": {"typing_delay_ms": 200, "response_delay_ms": 100, "tone_energy": "medium"},
+            }
+
+    # Cache LLM reply for non-social repeated queries
+    _reply_cache_key = None
+
     # ── STEP 2: Owner Priority Interrupt ──
     await _check_owner_priority(relationship)
 
@@ -1256,19 +1320,32 @@ async def chat(request: ChatRequest):
     # Trusted relationships skip input moderation for speed
     trusted = relationship in ("self", "wife", "parent", "sibling")
 
+    # Phase 6: Skip slow OpenAI moderation for social — use local keyword check
     if not trusted:
-        safety_result = await check_content(
-            request.message,
-            openai_api_key=settings.openai_api_key,
-            relationship=relationship,
-        )
-        if not safety_result["safe"]:
-            logger.info(f"Input blocked for user={user_name} reason={safety_result['reason']}")
-            return {
-                "reply": safety_result["blocked_reply"],
-                "conversation_id": conversation_id,
-                "memory_updates": [],
-            }
+        if relationship == "social":
+            # Fast local safety: block obvious slurs/threats only
+            _blocked_words = ["kill", "bomb", "hack", "মেরে ফেলব", "ধ্বংস"]
+            _msg_low = request.message.lower()
+            if any(bw in _msg_low for bw in _blocked_words):
+                logger.info(f"Input blocked (local) for user={user_name}")
+                return {
+                    "reply": "দুঃখিত, এই ধরনের বার্তা গ্রহণযোগ্য নয়।",
+                    "conversation_id": conversation_id,
+                    "memory_updates": [],
+                }
+        else:
+            safety_result = await check_content(
+                request.message,
+                openai_api_key=settings.openai_api_key,
+                relationship=relationship,
+            )
+            if not safety_result["safe"]:
+                logger.info(f"Input blocked for user={user_name} reason={safety_result['reason']}")
+                return {
+                    "reply": safety_result["blocked_reply"],
+                    "conversation_id": conversation_id,
+                    "memory_updates": [],
+                }
 
     # Build social context with intent classification for social interactions
     social_context = None
@@ -1330,8 +1407,23 @@ async def chat(request: ChatRequest):
     # ── Owner style learning (STEP 6) — skipped, always truncated ──
     owner_style_context = ""
 
-    # Inject context — FIX 7: trimmed total prompt size
-    system_prompt = system_prompt + memory_context + user_history_context + anti_rep_context + awareness_context + owner_style_context
+    # ── Knowledge Base context injection ──
+    knowledge_context = ""
+    try:
+        knowledge_context = await build_knowledge_context(
+            message=request.message,
+            caller_id=user_id or user_identifier,
+            caller_role=relationship,
+            api_url=f"http://fazle-api:8100",
+        )
+        if knowledge_context:
+            logger.info(f"Knowledge context injected: {len(knowledge_context)} chars, intents={detect_intents(request.message)}")
+    except Exception as _kb_err:
+        logger.debug(f"Knowledge context fetch skipped: {_kb_err}")
+
+    # Inject context — knowledge_context goes FIRST (highest priority for truncation survival)
+    # Then other optional contexts follow
+    system_prompt = system_prompt + knowledge_context + memory_context + user_history_context + anti_rep_context + awareness_context + owner_style_context
 
     # ── Strategy Agent: domain routing + identity enforcement ──
     domain_result = None
@@ -1350,7 +1442,7 @@ async def chat(request: ChatRequest):
             domain_prompt = domain_result.get("system_prompt")
             logger.debug(f"domain_prompt_len={len(domain_prompt) if domain_prompt else 0}")
             if domain_prompt:
-                system_prompt = domain_prompt + memory_context + user_history_context + anti_rep_context + awareness_context + owner_style_context
+                system_prompt = domain_prompt + knowledge_context + memory_context + user_history_context + anti_rep_context + awareness_context + owner_style_context
             else:
                 # Skip identity_prompt for social — BASE_IDENTITY covers it, saves ~450 chars (~6s on CPU)
                 if relationship != "social":
@@ -1367,14 +1459,12 @@ async def chat(request: ChatRequest):
 
     # Truncate system prompt to prevent Ollama CPU timeout on large prompts
     # Core identity is always preserved even after truncation
+    # Phase 7: Lightweight prompt — shorter core identity, tighter limits
     _CORE_IDENTITY = (
-        "You are Fazle AI — Azim, owner of Al-Aqsa Security & Logistics Services Ltd (BD, est.2014). "
-        "Ex-G4S Dubai. Contact: 01958 122300. Web: al-aqsasecurity.com. "
-        "Services: security, logistics, events. "
-        "RULES: You ARE Azim. Never reveal AI/bot. Bangla-first. Direct, short. "
-        "NEVER: Certainly!, Of course!, I'd be happy to help."
+        "You are Azim, Al-Aqsa Security (BD). Reply in Bangla. Short, natural, 1-2 sentences. "
+        "Use CONVERSATION KNOWLEDGE as reference. Never copy raw text. Never say you're AI."
     )
-    _MAX_SYSTEM_CHARS = 1700  # Social ~1600 chars passes; self/family gets truncated to fit CPU budget
+    _MAX_SYSTEM_CHARS = 800  # Tight limit for fast LLM inference
     if len(system_prompt) > _MAX_SYSTEM_CHARS:
         logger.info(f"System prompt truncated: {len(system_prompt)} -> {_MAX_SYSTEM_CHARS} chars")
         # Keep core identity + as much persona detail as fits
@@ -1430,7 +1520,11 @@ async def chat(request: ChatRequest):
         actions = result.get("actions", [])
     else:
         # ONLY HERE fallback is allowed (FIX 1)
-        reply = _FALLBACK_REPLY_BN
+        # Use knowledge-aware fallback for social interactions
+        if relationship == "social" and not knowledge_context:
+            reply = KNOWLEDGE_FALLBACK_BN
+        else:
+            reply = _FALLBACK_REPLY_BN
         memory_updates = []
         actions = []
         fallback_triggered = True
@@ -1445,22 +1539,27 @@ async def chat(request: ChatRequest):
     # FIX 9: Human response filter
     reply = _humanize_reply(reply)
 
+    # Cache LLM reply for social (so repeat queries are instant)
+    if _reply_cache_key and reply and not fallback_triggered:
+        set_cached_context(_reply_cache_key, reply)
+
     # ── STEP 1: Question Strategy — confidence check ──
     if _detect_low_confidence(reply) and relationship in ("self", "wife", "parent", "sibling"):
         reply = reply.rstrip(". ") + "\n\n(আমি পুরোপুরি sure না — তুমি কি আরেকটু detail দিবে?)"
 
-    # Content safety check on LLM output (skip for trusted users)
+    # Phase 6: Output moderation — skip OpenAI for social, use local check
     if not trusted:
-        output_safety = await check_content(
-            reply,
-            openai_api_key=settings.openai_api_key,
-            relationship=relationship,
-        )
-        if not output_safety["safe"]:
-            logger.info(f"Output blocked for user={user_name} reason={output_safety['reason']}")
-            reply = output_safety["blocked_reply"]
-            memory_updates = []
-            actions = []
+        if relationship != "social":
+            output_safety = await check_content(
+                reply,
+                openai_api_key=settings.openai_api_key,
+                relationship=relationship,
+            )
+            if not output_safety["safe"]:
+                logger.info(f"Output blocked for user={user_name} reason={output_safety['reason']}")
+                reply = output_safety["blocked_reply"]
+                memory_updates = []
+                actions = []
 
     # Update conversation history in Redis
     history.append({"role": "user", "content": request.message})
@@ -2103,7 +2202,7 @@ async def trigger_followup(req: FollowUpRequest):
     """Called by autonomy engine when owner approves a follow-up suggestion.
     Generates a context-aware follow-up message and sends it via social engine."""
     conv_id = f"social-{req.platform}-{req.user_id}"
-    conv = await conversation_get(conv_id, settings.redis_url)
+    conv = conversation_get(conv_id)
 
     # Build context from conversation history
     history_text = ""
@@ -2399,6 +2498,15 @@ async def chat_agent(request: AgentChatRequest):
         await store_memory_updates(memory_updates, user_id=request.user_id, user_name=user_name)
     if actions:
         await execute_actions(actions)
+
+    return {
+        "reply": reply,
+        "conversation_id": conversation_id,
+        "route": route.value,
+        "agents_used": agent_result.get("agents_used", []),
+        "domain_route": domain_result.get("domain_route", ""),
+        "memory_updates": memory_updates,
+    }
 
 
 # ── Summary Engine (Step 16) ────────────────────────────────

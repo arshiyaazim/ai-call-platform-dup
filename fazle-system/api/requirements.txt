@@ -16,4 +16,5 @@ Pillow==11.1.0
 minio==7.2.12
 openai==1.58.1
 cryptography==44.0.0
-prometheus-client==0.21.1\nredis==5.2.1
+prometheus-client==0.21.1
+redis==5.2.1
