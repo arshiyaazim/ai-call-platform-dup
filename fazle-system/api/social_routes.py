@@ -327,6 +327,52 @@ async def create_campaign(body: dict, user: dict = Depends(require_admin)):
     return result
 
 
+@router.get("/campaigns/{campaign_id}")
+async def get_campaign(campaign_id: str, user: dict = Depends(require_admin)):
+    """Get a single campaign by ID."""
+    return await _proxy("get", f"/campaigns/{campaign_id}")
+
+
+@router.put("/campaigns/{campaign_id}")
+async def update_campaign(campaign_id: str, body: dict, user: dict = Depends(require_admin)):
+    """Update a social campaign."""
+    result = await _proxy("put", f"/campaigns/{campaign_id}", json=body)
+    log_action(user, "update_campaign", target_type="social", detail=campaign_id)
+    return result
+
+
+@router.delete("/campaigns/{campaign_id}")
+async def delete_campaign(campaign_id: str, user: dict = Depends(require_admin)):
+    """Delete or cancel a social campaign."""
+    result = await _proxy("delete", f"/campaigns/{campaign_id}")
+    log_action(user, "delete_campaign", target_type="social", detail=campaign_id)
+    return result
+
+
+# ── Scheduled Messages ─────────────────────────────────────
+
+@router.get("/scheduled")
+async def list_all_scheduled(user: dict = Depends(require_admin)):
+    """List all scheduled messages across platforms."""
+    return await _proxy("get", "/scheduled")
+
+
+@router.delete("/scheduled/{message_id}")
+async def cancel_scheduled_message(message_id: str, user: dict = Depends(require_admin)):
+    """Cancel a scheduled message."""
+    result = await _proxy("delete", f"/scheduled/{message_id}")
+    log_action(user, "cancel_scheduled", target_type="social", detail=message_id)
+    return result
+
+
+@router.put("/scheduled/{message_id}")
+async def update_scheduled_message(message_id: str, body: dict, user: dict = Depends(require_admin)):
+    """Update a scheduled message (e.g., reschedule or change content)."""
+    result = await _proxy("put", f"/scheduled/{message_id}", json=body)
+    log_action(user, "update_scheduled", target_type="social", detail=message_id)
+    return result
+
+
 # ── Stats ──────────────────────────────────────────────────
 
 @router.get("/stats")

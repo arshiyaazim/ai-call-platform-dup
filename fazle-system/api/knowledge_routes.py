@@ -153,6 +153,16 @@ class KnowledgeInsert(BaseModel):
     tags: Optional[list[str]] = None
 
 
+class KnowledgeUpdate(BaseModel):
+    category: Optional[str] = None
+    key: Optional[str] = None
+    value: Optional[str] = None
+    subcategory: Optional[str] = None
+    language: Optional[str] = None
+    confidence: Optional[float] = None
+    tags: Optional[list[str]] = None
+
+
 # ── Search endpoint ──────────────────────────────────────────
 
 @router.get("/search")
@@ -305,6 +315,60 @@ def add_knowledge(data: dict):
     except Exception as e:
         logger.error(f"knowledge add failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Knowledge update ─────────────────────────────────────────
+
+@router.put("/{entry_id}")
+def update_knowledge(entry_id: int, body: KnowledgeUpdate):
+    """Update a knowledge entry by ID. For admin/internal use."""
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    try:
+        set_clause = ", ".join(f"{k} = %s" for k in updates)
+        values = list(updates.values()) + [entry_id]
+        with _get_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"UPDATE fazle_knowledge_base SET {set_clause} "
+                    f"WHERE id = %s RETURNING id, category, key, value",
+                    values,
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Knowledge entry not found")
+            conn.commit()
+            return {"status": "updated", "entry": dict(row)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"knowledge update failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update knowledge")
+
+
+# ── Knowledge delete ─────────────────────────────────────────
+
+@router.delete("/{entry_id}")
+def delete_knowledge(entry_id: int):
+    """Delete a knowledge entry by ID. For admin/internal use."""
+    try:
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM fazle_knowledge_base WHERE id = %s RETURNING id",
+                    (entry_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Knowledge entry not found")
+            conn.commit()
+            return {"status": "deleted", "id": entry_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"knowledge delete failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete knowledge")
 
 
 # ── Context builder for AI prompt injection ──────────────────

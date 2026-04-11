@@ -369,209 +369,138 @@ def ensure_admin_tables():
     logger.info("Admin config tables ensured (agents, plugins, tasks, persona)")
 
 
-# ── Agent CRUD ──────────────────────────────────────────────
+# ── Agent CRUD (delegates to centralized MaintenanceRepository) ──
 
 def list_agents() -> list[dict]:
-    with _get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT * FROM fazle_admin_agents ORDER BY priority, created_at")
-            return [dict(r) for r in cur.fetchall()]
+    from admin_data_access.repository import MaintenanceRepository
+    result = MaintenanceRepository.list_rows("fazle_admin_agents", per_page=500)
+    return result["rows"]
 
 
 def get_agent(agent_id: str) -> Optional[dict]:
-    with _get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT * FROM fazle_admin_agents WHERE id = %s", (agent_id,))
-            row = cur.fetchone()
-            return dict(row) if row else None
+    from admin_data_access.repository import MaintenanceRepository
+    return MaintenanceRepository.get_row("fazle_admin_agents", agent_id)
 
 
 def create_agent(name: str, model: str, priority: int, description: str, status: str = "active") -> dict:
-    with _get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """INSERT INTO fazle_admin_agents (name, model, priority, description, status)
-                   VALUES (%s, %s, %s, %s, %s) RETURNING *""",
-                (name, model, priority, description, status),
-            )
-            conn.commit()
-            return dict(cur.fetchone())
+    from admin_data_access.repository import MaintenanceRepository
+    return MaintenanceRepository.create_row("fazle_admin_agents", {
+        "name": name, "model": model, "priority": priority,
+        "description": description, "status": status,
+    })
 
 
 def update_agent(agent_id: str, **fields) -> Optional[dict]:
+    from admin_data_access.repository import MaintenanceRepository
     allowed = {"name", "model", "priority", "description", "status"}
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
         return get_agent(agent_id)
-    set_clause = ", ".join(f"{k} = %s" for k in updates)
-    values = list(updates.values()) + [agent_id]
-    with _get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                f"UPDATE fazle_admin_agents SET {set_clause}, updated_at = NOW() WHERE id = %s RETURNING *",
-                values,
-            )
-            conn.commit()
-            row = cur.fetchone()
-            return dict(row) if row else None
+    return MaintenanceRepository.update_row("fazle_admin_agents", agent_id, updates)
 
 
 def delete_agent(agent_id: str) -> bool:
-    with _get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM fazle_admin_agents WHERE id = %s", (agent_id,))
-            conn.commit()
-            return cur.rowcount > 0
+    from admin_data_access.repository import MaintenanceRepository
+    return MaintenanceRepository.delete_row("fazle_admin_agents", agent_id)
 
 
-# ── Plugin CRUD ─────────────────────────────────────────────
+# ── Plugin CRUD (delegates to centralized MaintenanceRepository) ──
 
 def list_plugins() -> list[dict]:
-    with _get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT * FROM fazle_admin_plugins ORDER BY created_at")
-            return [dict(r) for r in cur.fetchall()]
+    from admin_data_access.repository import MaintenanceRepository
+    result = MaintenanceRepository.list_rows("fazle_admin_plugins", per_page=500)
+    return result["rows"]
 
 
 def create_plugin(name: str, description: str, version: str, status: str = "enabled", manifest: dict = None) -> dict:
-    import json
-    with _get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """INSERT INTO fazle_admin_plugins (name, description, version, status, manifest)
-                   VALUES (%s, %s, %s, %s, %s) RETURNING *""",
-                (name, description, version, status, json.dumps(manifest or {})),
-            )
-            conn.commit()
-            return dict(cur.fetchone())
+    from admin_data_access.repository import MaintenanceRepository
+    return MaintenanceRepository.create_row("fazle_admin_plugins", {
+        "name": name, "description": description, "version": version,
+        "status": status, "manifest": manifest or {},
+    })
 
 
 def update_plugin(plugin_id: str, **fields) -> Optional[dict]:
-    import json
-    allowed = {"name", "description", "version", "status"}
+    from admin_data_access.repository import MaintenanceRepository
+    allowed = {"name", "description", "version", "status", "manifest"}
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
-    if "manifest" in fields and fields["manifest"] is not None:
-        updates["manifest"] = json.dumps(fields["manifest"])
     if not updates:
         return get_plugin(plugin_id)
-    set_clause = ", ".join(f"{k} = %s" for k in updates)
-    values = list(updates.values()) + [plugin_id]
-    with _get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                f"UPDATE fazle_admin_plugins SET {set_clause}, updated_at = NOW() WHERE id = %s RETURNING *",
-                values,
-            )
-            conn.commit()
-            row = cur.fetchone()
-            return dict(row) if row else None
+    return MaintenanceRepository.update_row("fazle_admin_plugins", plugin_id, updates)
 
 
 def get_plugin(plugin_id: str) -> Optional[dict]:
-    with _get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT * FROM fazle_admin_plugins WHERE id = %s", (plugin_id,))
-            row = cur.fetchone()
-            return dict(row) if row else None
+    from admin_data_access.repository import MaintenanceRepository
+    return MaintenanceRepository.get_row("fazle_admin_plugins", plugin_id)
 
 
 def delete_plugin(plugin_id: str) -> bool:
-    with _get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM fazle_admin_plugins WHERE id = %s", (plugin_id,))
-            conn.commit()
-            return cur.rowcount > 0
+    from admin_data_access.repository import MaintenanceRepository
+    return MaintenanceRepository.delete_row("fazle_admin_plugins", plugin_id)
 
 
-# ── Admin Task CRUD ─────────────────────────────────────────
+# ── Admin Task CRUD (delegates to centralized MaintenanceRepository) ──
 
 def list_admin_tasks() -> list[dict]:
-    with _get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT * FROM fazle_admin_tasks ORDER BY created_at DESC")
-            return [dict(r) for r in cur.fetchall()]
+    from admin_data_access.repository import MaintenanceRepository
+    result = MaintenanceRepository.list_rows("fazle_admin_tasks", per_page=500)
+    return result["rows"]
 
 
 def create_admin_task(title: str, task_type: str, schedule: str = "",
                       scheduled_at: str = None, description: str = "", status: str = "pending") -> dict:
-    with _get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """INSERT INTO fazle_admin_tasks (title, task_type, schedule, scheduled_at, description, status)
-                   VALUES (%s, %s, %s, %s, %s, %s) RETURNING *""",
-                (title, task_type, schedule, scheduled_at, description, status),
-            )
-            conn.commit()
-            return dict(cur.fetchone())
+    from admin_data_access.repository import MaintenanceRepository
+    data = {"title": title, "task_type": task_type, "description": description, "status": status}
+    if schedule:
+        data["schedule"] = schedule
+    if scheduled_at:
+        data["scheduled_at"] = scheduled_at
+    return MaintenanceRepository.create_row("fazle_admin_tasks", data)
 
 
 def update_admin_task(task_id: str, **fields) -> Optional[dict]:
+    from admin_data_access.repository import MaintenanceRepository
     allowed = {"title", "task_type", "schedule", "scheduled_at", "description", "status"}
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not updates:
         return get_admin_task(task_id)
-    set_clause = ", ".join(f"{k} = %s" for k in updates)
-    values = list(updates.values()) + [task_id]
-    with _get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                f"UPDATE fazle_admin_tasks SET {set_clause}, updated_at = NOW() WHERE id = %s RETURNING *",
-                values,
-            )
-            conn.commit()
-            row = cur.fetchone()
-            return dict(row) if row else None
+    return MaintenanceRepository.update_row("fazle_admin_tasks", task_id, updates)
 
 
 def get_admin_task(task_id: str) -> Optional[dict]:
-    with _get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT * FROM fazle_admin_tasks WHERE id = %s", (task_id,))
-            row = cur.fetchone()
-            return dict(row) if row else None
+    from admin_data_access.repository import MaintenanceRepository
+    return MaintenanceRepository.get_row("fazle_admin_tasks", task_id)
 
 
 def delete_admin_task(task_id: str) -> bool:
-    with _get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM fazle_admin_tasks WHERE id = %s", (task_id,))
-            conn.commit()
-            return cur.rowcount > 0
+    from admin_data_access.repository import MaintenanceRepository
+    return MaintenanceRepository.delete_row("fazle_admin_tasks", task_id)
 
 
-# ── Persona ─────────────────────────────────────────────────
+# ── Persona (delegates to centralized MaintenanceRepository) ──
 
 def get_persona() -> dict:
-    with _get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT * FROM fazle_admin_persona WHERE id = 1")
-            row = cur.fetchone()
-            if row:
-                return dict(row)
-            return {
-                "name": "Azim", "tone": "Warm, caring, knowledgeable",
-                "language": "English",
-                "speaking_style": "Natural conversational tone with occasional humor.",
-                "knowledge_notes": "Family AI assistant with deep personal knowledge.",
-            }
+    from admin_data_access.repository import MaintenanceRepository
+    result = MaintenanceRepository.list_rows("fazle_admin_persona", per_page=1)
+    if result["rows"]:
+        return result["rows"][0]
+    return {
+        "name": "Azim", "tone": "Warm, caring, knowledgeable",
+        "language": "English",
+        "speaking_style": "Natural conversational tone with occasional humor.",
+        "knowledge_notes": "Family AI assistant with deep personal knowledge.",
+    }
 
 
 def update_persona(**fields) -> dict:
+    from admin_data_access.repository import MaintenanceRepository
     allowed = {"name", "tone", "language", "speaking_style", "knowledge_notes"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return get_persona()
-    set_clause = ", ".join(f"{k} = %s" for k in updates)
-    values = list(updates.values())
-    with _get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                f"UPDATE fazle_admin_persona SET {set_clause}, updated_at = NOW() WHERE id = 1 RETURNING *",
-                values,
-            )
-            conn.commit()
-            row = cur.fetchone()
-            return dict(row) if row else get_persona()
+    # Persona is singleton (id=1), use integer primary key
+    result = MaintenanceRepository.update_row("fazle_admin_persona", "1", updates)
+    return result if result else get_persona()
 
 
 # ── Dashboard stats ─────────────────────────────────────────

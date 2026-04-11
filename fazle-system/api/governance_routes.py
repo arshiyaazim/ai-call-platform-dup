@@ -50,6 +50,13 @@ class PhrasingCreate(BaseModel):
     language: str = Field(default="bn", max_length=10)
 
 
+class PhrasingUpdate(BaseModel):
+    topic: Optional[str] = Field(default=None, max_length=100)
+    preferred_phrasing: Optional[str] = Field(default=None, max_length=1000)
+    prohibited_phrasing: Optional[str] = Field(default=None, max_length=1000)
+    language: Optional[str] = Field(default=None, max_length=10)
+
+
 class CorrectionOut(BaseModel):
     id: str
     category: str
@@ -252,6 +259,62 @@ def create_phrasing(body: PhrasingCreate, _=Depends(require_admin)):
             return row
     except Exception as e:
         logger.exception("create_phrasing failed")
+        raise HTTPException(500, str(e))
+
+
+@router.put("/phrasing/{phrasing_id}")
+def update_phrasing(phrasing_id: str, body: PhrasingUpdate, _=Depends(require_admin)):
+    """Update an existing phrasing rule (admin only)."""
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(400, "No fields to update")
+    try:
+        set_parts = [f"{k} = %s" for k in updates]
+        values = list(updates.values()) + [phrasing_id]
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"UPDATE fazle_knowledge_phrasing "
+                    f"SET {', '.join(set_parts)} "
+                    f"WHERE id = %s AND status = 'active' "
+                    f"RETURNING id, topic, preferred_phrasing, prohibited_phrasing, language, status",
+                    values,
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(404, "Active phrasing rule not found")
+                row["id"] = str(row["id"])
+            conn.commit()
+            return row
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("update_phrasing failed")
+        raise HTTPException(500, str(e))
+
+
+@router.delete("/phrasing/{phrasing_id}")
+def delete_phrasing(phrasing_id: str, _=Depends(require_admin)):
+    """Soft-delete a phrasing rule by setting status to 'deprecated' (admin only)."""
+    try:
+        with _conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    UPDATE fazle_knowledge_phrasing
+                    SET status = 'deprecated', deprecated_at = NOW()
+                    WHERE id = %s AND status = 'active'
+                    RETURNING id, topic, status
+                """, (phrasing_id,))
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(404, "Active phrasing rule not found")
+                row["id"] = str(row["id"])
+            conn.commit()
+            return {"status": "deleted", "rule": row}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("delete_phrasing failed")
         raise HTTPException(500, str(e))
 
 

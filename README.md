@@ -368,15 +368,28 @@ The Fazle UI (Next.js 14, TypeScript, Tailwind CSS) provides a control dashboard
 
 | Page | Route | Purpose |
 |------|-------|---------|
-| Overview | `/dashboard` | System status, quick actions |
-| Conversations | `/dashboard/conversations` | Chat history, search |
-| Settings | `/dashboard/settings` | Brain, memory, voice configuration |
-| **Autonomous Tasks** | `/dashboard/autonomous-tasks` | Create/manage background tasks, schedule intervals, view execution history |
-| **Tool Engine** | `/dashboard/tool-engine` | View tool registry, enable/disable tools, trigger manual tool executions |
-| **Knowledge Graph** | `/dashboard/knowledge-graph` | Visualize entities and relationships, browse nodes by type |
-| **Learning** | `/dashboard/learning` | View learning insights, trigger analysis, monitor pattern detection stats |
-
-Pages marked in **bold** were added in Phase 5.
+| Overview | `/dashboard/fazle` | System status, quick actions |
+| Logs | `/dashboard/fazle/logs` | Conversation history, search |
+| Memory | `/dashboard/fazle/memory` | Semantic memory search, fact storage |
+| Agents | `/dashboard/fazle/agents` | Agent registry and status |
+| Tools | `/dashboard/fazle/tools` | Tool registry, enable/disable tools, trigger manual executions |
+| Tasks | `/dashboard/fazle/tasks` | Task scheduling and reminders |
+| Persona | `/dashboard/fazle/persona` | Personality configuration |
+| Autonomy | `/dashboard/fazle/autonomy` | Goal decomposition and autonomous planning |
+| Knowledge Graph | `/dashboard/fazle/knowledge-graph` | Visualize entities and relationships, browse nodes by type |
+| Auto Tasks | `/dashboard/fazle/autonomous-tasks` | Create/manage background tasks, schedule intervals, view execution history |
+| Learning | `/dashboard/fazle/learning` | View learning insights, trigger analysis, monitor pattern detection stats |
+| AI Safety | `/dashboard/fazle/ai-safety` | Content safety and guardrail configuration |
+| Observability | `/dashboard/fazle/observability` | Distributed tracing and metrics |
+| Workflows | `/dashboard/fazle/workflows` | Multi-step workflow automation |
+| Marketplace | `/dashboard/fazle/tool-marketplace` | Tool marketplace |
+| Watchdog | `/dashboard/fazle/watchdog` | AI watchdog monitoring |
+| Users | `/dashboard/fazle/users` | User management |
+| Social | `/dashboard/fazle/social` | WhatsApp/Facebook intent detection |
+| Contacts | `/dashboard/fazle/contacts` | Contact intelligence |
+| Privacy | `/dashboard/fazle/privacy` | Privacy controls |
+| GDPR Admin | `/dashboard/fazle/gdpr-admin` | GDPR compliance administration |
+| Settings | `/dashboard/fazle/settings` | Brain, memory, voice configuration |
 
 ---
 

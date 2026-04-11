@@ -27,6 +27,7 @@ import {
   Users,
   MessageCircle,
   BookUser,
+  Database,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useSidebarStore } from '@/store/sidebar';
@@ -53,6 +54,7 @@ const navItems = [
   { href: '/dashboard/fazle/contacts', label: 'Contacts', icon: BookUser },
   { href: '/dashboard/fazle/privacy', label: 'Privacy', icon: ShieldCheck },
   { href: '/dashboard/fazle/gdpr-admin', label: 'GDPR Admin', icon: Shield },
+  { href: '/dashboard/fazle/database-maintenance', label: 'DB Maintenance', icon: Database },
   { href: '/dashboard/fazle/logs', label: 'Logs', icon: ScrollText },
   { href: '/dashboard/fazle/settings', label: 'Settings', icon: Settings },
 ];

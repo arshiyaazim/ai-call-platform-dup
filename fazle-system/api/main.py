@@ -45,6 +45,7 @@ from lead_routes import router as lead_router, ensure_leads_table
 from governance_routes import router as governance_router, ensure_governance_tables
 from owner_query_routes import router as owner_query_router
 from user_rules_routes import router as user_rules_router, ensure_user_rules_tables
+from maintenance_routes import router as maintenance_router
 from auth import (
     hash_password, verify_password, create_access_token,
     get_current_user, require_admin, get_optional_user,
@@ -198,6 +199,7 @@ app.include_router(lead_router)
 app.include_router(governance_router)
 app.include_router(owner_query_router)
 app.include_router(user_rules_router)
+app.include_router(maintenance_router)
 
 
 async def verify_api_key(x_api_key: Optional[str] = Header(None)):
