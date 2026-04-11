@@ -21,35 +21,27 @@ class ConversationAgent(BaseAgent):
         self.ollama_url = ollama_url
         self.voice_fast_model = voice_fast_model
         self.llm_gateway_url = llm_gateway_url
-        self._client: httpx.AsyncClient | None = None
-
-    def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                base_url=self.ollama_url,
-                timeout=httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0),
-            )
-        return self._client
 
     async def can_handle(self, ctx: AgentContext) -> bool:
         return True  # Conversation agent is the default fallback
 
     async def execute(self, ctx: AgentContext) -> AgentResult:
-        """Generate a conversational response (non-streaming)."""
+        """Generate a conversational response via gateway (non-streaming)."""
         messages = self._build_messages(ctx)
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(
-                    f"{self.ollama_url}/api/chat",
+                    f"{self.llm_gateway_url}/generate",
                     json={
-                        "model": self.voice_fast_model,
                         "messages": messages,
-                        "stream": False,
+                        "caller": "fazle-conversation-agent",
+                        "temperature": 0.7,
+                        "max_tokens": 80,
+                        "request_type": "user_chat",
                     },
                 )
                 resp.raise_for_status()
-                data = resp.json()
-                content = data.get("message", {}).get("content", "")
+                content = resp.json().get("content", "")
                 return AgentResult(content=content)
         except Exception as e:
             logger.error(f"Conversation agent failed: {e}")
@@ -59,30 +51,46 @@ class ConversationAgent(BaseAgent):
             )
 
     async def stream(self, ctx: AgentContext) -> AsyncIterator[str]:
-        """Stream conversational response tokens."""
+        """Stream conversational response tokens via gateway."""
         messages = self._build_messages(ctx)
         try:
-            client = self._get_client()
-            async with client.stream(
-                "POST",
-                "/api/generate",
-                json={
-                    "model": self.voice_fast_model,
-                    "prompt": ctx.message,
-                    "system": self._build_system_prompt(ctx),
-                    "stream": True,
-                    "options": {"num_ctx": 512, "num_predict": 40},
-                },
-            ) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if line.strip():
-                        data = json.loads(line)
-                        chunk = data.get("response", "")
-                        if chunk:
-                            yield chunk
-                        if data.get("done", False):
-                            break
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self.llm_gateway_url}/generate",
+                    json={
+                        "messages": messages,
+                        "caller": "fazle-conversation-agent-stream",
+                        "temperature": 0.7,
+                        "stream": True,
+                        "max_tokens": 40,
+                        "request_type": "user_chat",
+                    },
+                ) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if line.startswith("data: "):
+                            chunk_str = line[6:].strip()
+                            if chunk_str == "[DONE]":
+                                break
+                            try:
+                                data = json.loads(chunk_str)
+                                # Ollama-style: {"content": "...", "done": ...}
+                                if "content" in data:
+                                    chunk = data.get("content", "")
+                                    if chunk:
+                                        yield chunk
+                                    if data.get("done", False):
+                                        break
+                                # OpenAI-style: {"choices": [{"delta": {"content": "..."}}]}
+                                elif "choices" in data:
+                                    delta = data["choices"][0].get("delta", {})
+                                    text = delta.get("content", "")
+                                    if text:
+                                        yield text
+                            except (json.JSONDecodeError, IndexError, KeyError):
+                                if chunk_str:
+                                    yield chunk_str
         except Exception as e:
             logger.error(f"Conversation stream failed: {e}")
             yield "Sorry, I'm having trouble right now."

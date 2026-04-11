@@ -444,3 +444,102 @@ async def lookup_user_context(phone: str, api_url: Optional[str] = None) -> Opti
     except Exception as e:
         logger.debug(f"User lookup failed for {phone}: {e}")
     return None
+
+
+# ── Phase 7: Smart Retrieval & Context Optimization ─────────
+
+_MEMORY_URL = "http://fazle-memory:8300"
+
+
+async def build_smart_context(
+    message: str,
+    caller_id: Optional[str] = None,
+    caller_role: Optional[str] = None,
+    memory_url: Optional[str] = None,
+    api_url: Optional[str] = None,
+) -> str:
+    """Smart knowledge retrieval: scored, deduplicated, formatted context.
+
+    Calls memory service /knowledge/retrieve for fact-aware, priority-scored
+    results. Falls back to legacy build_knowledge_context() on failure.
+
+    Returns a compact context string (max ~400 chars) for LLM injection.
+    Priority order: owner facts > business > relevant memory > conversation.
+    """
+    base_memory = memory_url or _MEMORY_URL
+
+    # Phase 7: Check cache first
+    cache_key = f"smart:{normalize_text(message)[:60]}:{caller_role}"
+    cached = get_cached_context(cache_key)
+    if cached is not None:
+        logger.info(f"Smart context from cache: {len(cached)} chars")
+        return cached
+
+    result_parts: list[str] = []
+
+    # ── 1. Structured facts from PostgreSQL (scored, priority-ranked) ──
+    try:
+        params = {"query": message[:200], "limit": 8}
+        # Detect category hint from message
+        msg_lower = message.lower()
+        personal_triggers = [
+            "name", "নাম", "birthday", "জন্মদিন", "nid", "passport",
+            "father", "mother", "বাবা", "মা", "wife", "blood",
+        ]
+        business_triggers = [
+            "company", "কোম্পানি", "business", "tin", "bank",
+            "al-aqsa", "security", "guard", "গার্ড", "service",
+        ]
+        if any(t in msg_lower for t in personal_triggers):
+            params["category"] = "personal"
+        elif any(t in msg_lower for t in business_triggers):
+            params["category"] = "business"
+
+        async with httpx.AsyncClient(timeout=2.5) as client:
+            resp = await client.get(
+                f"{base_memory}/knowledge/retrieve",
+                params=params,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                context_str = data.get("context", "")
+                selected = data.get("selected_count", 0)
+                if context_str:
+                    result_parts.append(context_str)
+                    logger.info(
+                        f"Smart retrieval OK: {selected} facts, "
+                        f"keywords={data.get('keywords', [])[:3]}, "
+                        f"context_len={len(context_str)}"
+                    )
+            else:
+                logger.warning(f"Smart retrieval returned {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"Smart retrieval failed, falling back: {e}")
+
+    # ── 2. Conversation knowledge (intent-based, from legacy flow) ──
+    try:
+        conv_ctx = await build_conversation_context(
+            message, caller_id=caller_id,
+            api_url=api_url or _API_URL,
+        )
+        if conv_ctx:
+            result_parts.append(f"\n--- CONVERSATION KNOWLEDGE ---\n{conv_ctx}\n--- END ---")
+    except Exception as e:
+        logger.debug(f"Conversation context skipped: {e}")
+
+    # ── 3. Combine + cap total size ──
+    combined = "\n".join(result_parts) if result_parts else ""
+
+    # Cap at 400 chars to survive the 800-char system prompt truncation
+    if len(combined) > 400:
+        combined = combined[:400].rsplit("\n", 1)[0]
+
+    # Cache result
+    set_cached_context(cache_key, combined)
+
+    if not combined:
+        logger.debug(f"Smart context: no facts matched for '{message[:40]}'")
+    else:
+        logger.info(f"Smart context built: {len(combined)} chars")
+
+    return combined

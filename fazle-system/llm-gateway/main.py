@@ -39,8 +39,8 @@ class Settings(BaseSettings):
     # Fallback model when primary fails or times out
     fallback_provider: str = "openai"
     fallback_model: str = "gpt-4o"
-    # Ollama timeout in seconds — if exceeded, fallback to OpenAI
-    ollama_timeout: int = 10
+    # Ollama timeout in seconds — if exceeded, fallback to OpenAI (env: FAZLE_OLLAMA_TIMEOUT)
+    ollama_timeout: int = int(os.environ.get("FAZLE_OLLAMA_TIMEOUT", "25"))
     # Cache TTL in seconds (0 = disabled)
     cache_ttl: int = 300
     # Rate limit: max requests per minute per caller
@@ -102,11 +102,32 @@ def _ensure_log_table():
                     usage_data JSONB,
                     latency_ms REAL,
                     is_fallback BOOLEAN DEFAULT FALSE,
-                    trainable BOOLEAN DEFAULT FALSE
+                    trainable BOOLEAN DEFAULT FALSE,
+                    request_type VARCHAR(30) DEFAULT 'user_chat',
+                    fallback_reason VARCHAR(30),
+                    endpoint VARCHAR(30) DEFAULT 'chat',
+                    user_role VARCHAR(30),
+                    message_length INT,
+                    response_length INT
                 );
                 CREATE INDEX IF NOT EXISTS idx_llm_log_ts ON llm_conversation_log(ts);
                 CREATE INDEX IF NOT EXISTS idx_llm_log_trainable ON llm_conversation_log(trainable) WHERE trainable = TRUE;
+                CREATE INDEX IF NOT EXISTS idx_llm_log_request_type ON llm_conversation_log(request_type);
+                CREATE INDEX IF NOT EXISTS idx_llm_log_provider ON llm_conversation_log(provider);
             """)
+            # Add columns if they don't exist (for existing tables)
+            for col, col_def in [
+                ("request_type", "VARCHAR(30) DEFAULT 'user_chat'"),
+                ("fallback_reason", "VARCHAR(30)"),
+                ("endpoint", "VARCHAR(30) DEFAULT 'chat'"),
+                ("user_role", "VARCHAR(30)"),
+                ("message_length", "INT"),
+                ("response_length", "INT"),
+            ]:
+                try:
+                    cur.execute(f"ALTER TABLE llm_conversation_log ADD COLUMN IF NOT EXISTS {col} {col_def}")
+                except Exception:
+                    pass
         conn.commit()
         conn.close()
         _DB_INIT_DONE = True
@@ -117,7 +138,10 @@ def _ensure_log_table():
 
 def _log_to_db(caller: str, user_id: str, provider: str, model: str,
                messages: list[dict], reply: str, usage: dict,
-               latency_ms: float, is_fallback: bool):
+               latency_ms: float, is_fallback: bool,
+               request_type: str = "user_chat", fallback_reason: str = None,
+               endpoint: str = "chat", user_role: str = None,
+               message_length: int = None, response_length: int = None):
     """Persist every LLM exchange to PostgreSQL (fire-and-forget)."""
     if not settings.database_url:
         return
@@ -126,12 +150,16 @@ def _log_to_db(caller: str, user_id: str, provider: str, model: str,
         with conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO llm_conversation_log
-                   (caller, user_id, provider, model, messages, reply, usage_data, latency_ms, is_fallback, trainable)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                   (caller, user_id, provider, model, messages, reply, usage_data,
+                    latency_ms, is_fallback, trainable, request_type, fallback_reason,
+                    endpoint, user_role, message_length, response_length)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (caller, user_id, provider, model,
                  json.dumps(messages), reply,
                  json.dumps(usage), latency_ms,
-                 is_fallback, is_fallback and provider == "openai"),
+                 is_fallback, is_fallback and provider == "openai",
+                 request_type, fallback_reason,
+                 endpoint, user_role, message_length, response_length),
             )
         conn.commit()
         conn.close()
@@ -243,6 +271,7 @@ async def _call_openai(
     temperature: float,
     response_format: Optional[str],
     api_key: str,
+    max_tokens: Optional[int] = None,
 ) -> dict:
     """Call OpenAI chat completions API."""
     body: dict = {
@@ -252,6 +281,8 @@ async def _call_openai(
     }
     if response_format == "json":
         body["response_format"] = {"type": "json_object"}
+    if max_tokens is not None:
+        body["max_tokens"] = max_tokens
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.post(
@@ -283,13 +314,17 @@ async def _call_ollama(
     model: str,
     temperature: float,
     response_format: Optional[str],
+    max_tokens: Optional[int] = None,
 ) -> dict:
     """Call local Ollama chat API."""
+    options = {"temperature": temperature}
+    if max_tokens is not None:
+        options["num_predict"] = max_tokens
     body: dict = {
         "model": model,
         "messages": messages,
         "stream": False,
-        "options": {"temperature": temperature},
+        "options": options,
     }
     # NEVER force JSON format on Ollama — causes 500 when model can't produce valid JSON
 
@@ -319,12 +354,13 @@ async def _call_provider(
     messages: list[dict],
     temperature: float,
     response_format: Optional[str],
+    max_tokens: Optional[int] = None,
 ) -> dict:
     """Route to the correct LLM provider."""
     if provider == "ollama":
-        return await _call_ollama(messages, model, temperature, response_format)
+        return await _call_ollama(messages, model, temperature, response_format, max_tokens)
     elif provider == "openai":
-        return await _call_openai(messages, model, temperature, response_format, settings.openai_api_key)
+        return await _call_openai(messages, model, temperature, response_format, settings.openai_api_key, max_tokens)
     else:
         raise ValueError(f"Unknown provider: {provider}")
 
@@ -337,6 +373,7 @@ async def _stream_openai(
     temperature: float,
     response_format: Optional[str],
     api_key: str,
+    max_tokens: Optional[int] = None,
 ):
     """Stream from OpenAI chat completions."""
     body: dict = {
@@ -347,6 +384,8 @@ async def _stream_openai(
     }
     if response_format == "json":
         body["response_format"] = {"type": "json_object"}
+    if max_tokens is not None:
+        body["max_tokens"] = max_tokens
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         async with client.stream(
@@ -373,13 +412,17 @@ async def _stream_ollama(
     model: str,
     temperature: float,
     response_format: Optional[str],
+    max_tokens: Optional[int] = None,
 ):
     """Stream from Ollama chat API."""
+    options = {"temperature": temperature}
+    if max_tokens is not None:
+        options["num_predict"] = max_tokens
     body: dict = {
         "model": model,
         "messages": messages,
         "stream": True,
-        "options": {"temperature": temperature},
+        "options": options,
     }
     if response_format == "json":
         body["format"] = "json"
@@ -407,14 +450,15 @@ async def _stream_ollama(
 class _BatchEntry:
     """One pending request in the batch window."""
     __slots__ = ("provider", "model", "messages", "temperature",
-                 "response_format", "future")
+                 "response_format", "max_tokens", "future")
 
-    def __init__(self, provider, model, messages, temperature, response_format):
+    def __init__(self, provider, model, messages, temperature, response_format, max_tokens=None):
         self.provider = provider
         self.model = model
         self.messages = messages
         self.temperature = temperature
         self.response_format = response_format
+        self.max_tokens = max_tokens
         self.future: asyncio.Future = asyncio.get_event_loop().create_future()
 
 
@@ -471,7 +515,7 @@ class _RequestBatcher:
         try:
             result = await _call_provider(
                 entry.provider, entry.model, entry.messages,
-                entry.temperature, entry.response_format,
+                entry.temperature, entry.response_format, entry.max_tokens,
             )
             entry.future.set_result(result)
         except Exception as e:
@@ -489,12 +533,14 @@ class GenerateRequest(BaseModel):
     provider: Optional[str] = Field(None, description="Override provider (openai/ollama)")
     model: Optional[str] = Field(None, description="Override model name")
     temperature: float = Field(0.7, ge=0.0, le=2.0)
+    max_tokens: Optional[int] = Field(None, description="Max tokens to generate (maps to num_predict for Ollama)")
     response_format: Optional[str] = Field(None, description="'json' for JSON mode")
     caller: str = Field("unknown", description="Calling service name for rate limiting")
     user_id: Optional[str] = Field(None, description="End-user ID for per-user rate limiting")
     stream: bool = Field(False, description="Enable SSE streaming")
     cache: bool = Field(True, description="Use response cache if available")
     context_inject: Optional[str] = Field(None, description="Extra context to prepend to system prompt")
+    request_type: str = Field("user_chat", description="Request type: user_chat, owner_analysis, memory, system. Only user_chat gets OpenAI fallback.")
 
 
 class GenerateResponse(BaseModel):
@@ -571,9 +617,9 @@ async def generate(request: GenerateRequest):
     # Streaming path
     if request.stream:
         if provider == "openai":
-            gen = _stream_openai(messages, model, request.temperature, request.response_format, settings.openai_api_key)
+            gen = _stream_openai(messages, model, request.temperature, request.response_format, settings.openai_api_key, request.max_tokens)
         else:
-            gen = _stream_ollama(messages, model, request.temperature, request.response_format)
+            gen = _stream_ollama(messages, model, request.temperature, request.response_format, request.max_tokens)
         return StreamingResponse(gen, media_type="text/event-stream")
 
     # Cache check
@@ -594,8 +640,9 @@ async def generate(request: GenerateRequest):
     start = time.monotonic()
     result = None
     is_fallback = False
+    fallback_reason = None
     try:
-        entry = _BatchEntry(provider, model, messages, request.temperature, request.response_format)
+        entry = _BatchEntry(provider, model, messages, request.temperature, request.response_format, request.max_tokens)
         result = await _batcher.submit(entry)
         llm_request_latency_hist.labels(provider=provider).observe(time.monotonic() - start)
         llm_requests_total.labels(provider=provider, status="success").inc()
@@ -604,15 +651,19 @@ async def generate(request: GenerateRequest):
         llm_request_latency_hist.labels(provider=provider).observe(primary_elapsed)
         llm_requests_total.labels(provider=provider, status="failed").inc()
         is_timeout = isinstance(primary_err, (httpx.ReadTimeout, httpx.ConnectTimeout, asyncio.TimeoutError))
-        logger.warning(f"Primary LLM failed ({provider}/{model}): {'TIMEOUT' if is_timeout else primary_err}")
-        # Fallback to OpenAI
+        fallback_reason = "timeout" if is_timeout else "error"
+        logger.warning(f"Primary LLM failed ({provider}/{model}): {fallback_reason.upper()} | request_type={request.request_type} | caller={request.caller}")
+
+        # Conditional fallback: only user_chat gets OpenAI fallback
         fb_provider = settings.fallback_provider
         fb_model = settings.fallback_model
-        if fb_provider != provider or fb_model != model:
+        allow_fallback = request.request_type == "user_chat" and (fb_provider != provider or fb_model != model)
+
+        if allow_fallback:
             try:
-                logger.info(f"Falling back to {fb_provider}/{fb_model}")
+                logger.info(f"Falling back to {fb_provider}/{fb_model} (request_type={request.request_type})")
                 fb_start = time.monotonic()
-                result = await _call_provider(fb_provider, fb_model, messages, request.temperature, request.response_format)
+                result = await _call_provider(fb_provider, fb_model, messages, request.temperature, request.response_format, request.max_tokens)
                 is_fallback = True
                 llm_request_latency_hist.labels(provider=fb_provider).observe(time.monotonic() - fb_start)
                 llm_requests_total.labels(provider=fb_provider, status="success").inc()
@@ -621,7 +672,35 @@ async def generate(request: GenerateRequest):
                 logger.error(f"Fallback LLM also failed: {fb_err}")
                 raise HTTPException(status_code=502, detail="All LLM providers unavailable") from fb_err
         else:
-            raise HTTPException(status_code=502, detail="LLM service unavailable") from primary_err
+            # Fallback blocked — return controlled response instead of 502
+            if fb_provider == provider and fb_model == model:
+                raise HTTPException(status_code=502, detail="LLM service unavailable") from primary_err
+            logger.info(f"Fallback BLOCKED for request_type={request.request_type} caller={request.caller} reason={fallback_reason}")
+            latency_ms = (time.monotonic() - start) * 1000
+            _msg_len = sum(len(m.get("content", "")) for m in messages)
+            _log_to_db(
+                caller=request.caller,
+                user_id=user_id,
+                provider=provider,
+                model=model,
+                messages=messages,
+                reply="[fallback_blocked]",
+                usage={},
+                latency_ms=round(latency_ms, 1),
+                is_fallback=False,
+                request_type=request.request_type,
+                fallback_reason=fallback_reason,
+                message_length=_msg_len,
+                response_length=0,
+            )
+            return GenerateResponse(
+                content="Local model could not respond in time",
+                model=model,
+                provider=provider,
+                usage={},
+                cached=False,
+                latency_ms=round(latency_ms, 1),
+            )
 
     latency_ms = (time.monotonic() - start) * 1000
 
@@ -656,6 +735,8 @@ async def generate(request: GenerateRequest):
         pass
 
     # Persist every exchange to PostgreSQL (conversations for training)
+    _msg_len = sum(len(m.get("content", "")) for m in messages)
+    _resp_len = len(result["content"])
     _log_to_db(
         caller=request.caller,
         user_id=user_id,
@@ -666,6 +747,10 @@ async def generate(request: GenerateRequest):
         usage=result["usage"],
         latency_ms=round(latency_ms, 1),
         is_fallback=is_fallback,
+        request_type=request.request_type,
+        fallback_reason=fallback_reason,
+        message_length=_msg_len,
+        response_length=_resp_len,
     )
 
     return GenerateResponse(**response_data)
@@ -743,6 +828,144 @@ async def training_data(limit: int = 100, offset: int = 0):
                 "source_model": row["model"],
             })
         return {"count": len(pairs), "training_pairs": pairs}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── OpenAI cost estimation (per 1K tokens) ──────────────────
+_OPENAI_COST_PER_1K = {
+    "gpt-4o": {"prompt": 0.005, "completion": 0.015},
+    "gpt-4o-mini": {"prompt": 0.00015, "completion": 0.0006},
+    "text-embedding-3-small": {"prompt": 0.00002, "completion": 0.0},
+    "text-embedding-3-large": {"prompt": 0.00013, "completion": 0.0},
+}
+
+
+def _estimate_cost(model: str, usage: dict) -> float:
+    """Estimate USD cost for an OpenAI call."""
+    rates = _OPENAI_COST_PER_1K.get(model, {"prompt": 0.005, "completion": 0.015})
+    prompt_tokens = usage.get("prompt_tokens", 0) or 0
+    completion_tokens = usage.get("completion_tokens", 0) or 0
+    return (prompt_tokens / 1000) * rates["prompt"] + (completion_tokens / 1000) * rates["completion"]
+
+
+@app.get("/analytics/llm-usage")
+async def analytics_llm_usage(days: int = 7):
+    """Comprehensive LLM usage analytics with cost estimation."""
+    if not settings.database_url:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    try:
+        conn = _get_db_conn()
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Total requests + provider breakdown
+            cur.execute("""
+                SELECT
+                    COUNT(*) as total_requests,
+                    COUNT(*) FILTER (WHERE provider = 'ollama') as ollama_requests,
+                    COUNT(*) FILTER (WHERE provider = 'openai') as openai_requests,
+                    COUNT(*) FILTER (WHERE is_fallback = TRUE) as fallback_count,
+                    ROUND(AVG(latency_ms)::numeric, 1) as avg_latency_ms,
+                    ROUND(AVG(latency_ms) FILTER (WHERE provider = 'ollama')::numeric, 1) as avg_latency_ollama,
+                    ROUND(AVG(latency_ms) FILTER (WHERE provider = 'openai')::numeric, 1) as avg_latency_openai,
+                    COALESCE(SUM(COALESCE(message_length, 0)), 0) as total_message_chars,
+                    COALESCE(SUM(COALESCE(response_length, 0)), 0) as total_response_chars
+                FROM llm_conversation_log
+                WHERE ts > NOW() - INTERVAL '%s days'
+            """ % int(days))
+            summary = cur.fetchone()
+
+            # Request type breakdown
+            cur.execute("""
+                SELECT request_type, COUNT(*) as count
+                FROM llm_conversation_log
+                WHERE ts > NOW() - INTERVAL '%s days'
+                GROUP BY request_type ORDER BY count DESC
+            """ % int(days))
+            type_rows = cur.fetchall()
+
+            # Fallback reason distribution
+            cur.execute("""
+                SELECT fallback_reason, COUNT(*) as count
+                FROM llm_conversation_log
+                WHERE ts > NOW() - INTERVAL '%s days' AND fallback_reason IS NOT NULL
+                GROUP BY fallback_reason ORDER BY count DESC
+            """ % int(days))
+            fallback_rows = cur.fetchall()
+
+            # Top callers
+            cur.execute("""
+                SELECT caller, COUNT(*) as count
+                FROM llm_conversation_log
+                WHERE ts > NOW() - INTERVAL '%s days'
+                GROUP BY caller ORDER BY count DESC LIMIT 10
+            """ % int(days))
+            caller_rows = cur.fetchall()
+
+            # Top users by request count
+            cur.execute("""
+                SELECT user_id, COUNT(*) as count
+                FROM llm_conversation_log
+                WHERE ts > NOW() - INTERVAL '%s days' AND user_id IS NOT NULL AND user_id != ''
+                GROUP BY user_id ORDER BY count DESC LIMIT 10
+            """ % int(days))
+            user_rows = cur.fetchall()
+
+            # Cost estimation: sum usage_data for OpenAI rows
+            cur.execute("""
+                SELECT model, usage_data
+                FROM llm_conversation_log
+                WHERE ts > NOW() - INTERVAL '%s days' AND provider = 'openai' AND usage_data IS NOT NULL
+            """ % int(days))
+            openai_rows = cur.fetchall()
+
+        conn.close()
+
+        # Compute cost
+        total_cost = 0.0
+        cost_by_model: dict = {}
+        for row in openai_rows:
+            u = row["usage_data"] if isinstance(row["usage_data"], dict) else {}
+            c = _estimate_cost(row["model"], u)
+            total_cost += c
+            cost_by_model[row["model"]] = cost_by_model.get(row["model"], 0.0) + c
+
+        total = summary["total_requests"] or 0
+        fallback_count = summary["fallback_count"] or 0
+        fallback_rate = f"{(fallback_count / total * 100):.1f}%" if total > 0 else "0%"
+
+        # Request type percentages
+        request_types = {}
+        for r in type_rows:
+            pct = round(r["count"] / total * 100, 1) if total > 0 else 0
+            request_types[r["request_type"] or "unknown"] = {"count": r["count"], "percent": pct}
+
+        return {
+            "period_days": days,
+            "total_requests": total,
+            "providers": {
+                "ollama": summary["ollama_requests"] or 0,
+                "openai": summary["openai_requests"] or 0,
+            },
+            "fallback_rate": fallback_rate,
+            "fallback_reasons": {r["fallback_reason"]: r["count"] for r in fallback_rows},
+            "avg_latency_ms": float(summary["avg_latency_ms"] or 0),
+            "avg_latency_by_provider": {
+                "ollama": float(summary["avg_latency_ollama"] or 0),
+                "openai": float(summary["avg_latency_openai"] or 0),
+            },
+            "request_types": request_types,
+            "top_callers": {r["caller"]: r["count"] for r in caller_rows},
+            "top_users": {r["user_id"]: r["count"] for r in user_rows},
+            "cost_estimation": {
+                "total_usd": round(total_cost, 4),
+                "by_model": {k: round(v, 4) for k, v in cost_by_model.items()},
+                "ollama_cost": 0.0,
+                "note": "Ollama runs locally at zero API cost",
+            },
+            "total_message_chars": summary["total_message_chars"],
+            "total_response_chars": summary["total_response_chars"],
+        }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -285,6 +285,68 @@ OWNER_COMMANDS: dict[str, CommandDef] = {
         ),
     ),
 
+    # ─── BUSINESS ACTIONS (Phase 8) ─────────────────────────
+    "add_client": CommandDef(
+        intent="add_client",
+        category=CommandCategory.INSTRUCT,
+        risk=RiskLevel.MEDIUM,
+        enforcement=Enforcement.CODE,
+        needs_confirmation=True,
+        needs_password=False,
+        description_bn="নতুন ক্লায়েন্ট যোগ করা",
+        description_en="Add a new client to the system",
+        db_table="fazle_clients",
+        examples=(
+            "ABC Company কে ক্লায়েন্ট হিসেবে যোগ করো",
+            "Add client XYZ, phone 01711234567",
+        ),
+    ),
+    "update_company_name": CommandDef(
+        intent="update_company_name",
+        category=CommandCategory.TEACH,
+        risk=RiskLevel.MEDIUM,
+        enforcement=Enforcement.CODE,
+        needs_confirmation=True,
+        needs_password=False,
+        description_bn="কোম্পানির নাম আপডেট করা",
+        description_en="Update the company name",
+        db_table="fazle_owner_knowledge",
+        examples=(
+            "আমাদের কোম্পানির নাম এখন Al-Aqsa Security",
+            "Company name change to ABC Ltd",
+        ),
+    ),
+    "assign_guard": CommandDef(
+        intent="assign_guard",
+        category=CommandCategory.INSTRUCT,
+        risk=RiskLevel.HIGH,
+        enforcement=Enforcement.CODE,
+        needs_confirmation=True,
+        needs_password=False,
+        description_bn="গার্ড অ্যাসাইন করা — ক্লায়েন্ট/লোকেশনে",
+        description_en="Assign a guard to a client or location",
+        db_table="fazle_guard_assignments",
+        examples=(
+            "রাশেদকে ইস্পাহানি পয়েন্টে দাও",
+            "Assign Karim to ABC Company at Agrabad",
+        ),
+    ),
+    "set_pricing": CommandDef(
+        intent="set_pricing",
+        category=CommandCategory.INSTRUCT,
+        risk=RiskLevel.HIGH,
+        enforcement=Enforcement.CODE,
+        needs_confirmation=True,
+        needs_password=False,
+        description_bn="সার্ভিসের দাম নির্ধারণ/আপডেট করা",
+        description_en="Set or update pricing for a service type",
+        db_table="fazle_service_pricing",
+        examples=(
+            "সার্ভে স্কট এর দাম ১৫,০০০ টাকা",
+            "Security guard service price 12000 BDT",
+        ),
+    ),
+
     # ─── PROMPT-ONLY (behaviour shaping, no code guard) ────
     "tone_adaptation": CommandDef(
         intent="tone_adaptation",

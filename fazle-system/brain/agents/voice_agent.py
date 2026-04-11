@@ -75,34 +75,21 @@ class VoiceAgent(BaseAgent):
         messages: list[dict],
         voice_fast_mode: bool = True,
     ) -> str:
-        """Generate a voice reply directly (ultra-fast path)."""
+        """Generate a voice reply via gateway (single entry point)."""
         try:
-            if voice_fast_mode:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    resp = await client.post(
-                        f"{self.ollama_url}/api/chat",
-                        json={
-                            "model": self.voice_fast_model,
-                            "messages": messages,
-                            "stream": False,
-                            "options": {"num_ctx": 1024, "num_predict": 60},
-                        },
-                    )
-                    resp.raise_for_status()
-                    return resp.json()["message"]["content"].strip()
-            else:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    resp = await client.post(
-                        f"{self.llm_gateway_url}/generate",
-                        json={
-                            "messages": messages,
-                            "caller": "fazle-voice-agent",
-                            "temperature": 0.7,
-                            "max_tokens": 80,
-                        },
-                    )
-                    resp.raise_for_status()
-                    return resp.json().get("content", "").strip()
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{self.llm_gateway_url}/generate",
+                    json={
+                        "messages": messages,
+                        "caller": "fazle-voice-agent",
+                        "temperature": 0.7,
+                        "max_tokens": 80,
+                        "request_type": "user_chat",
+                    },
+                )
+                resp.raise_for_status()
+                return resp.json().get("content", "").strip()
         except Exception as e:
             logger.error(f"Voice generation failed: {e}")
             return "দুঃখিত, একটু সমস্যা হচ্ছে।"

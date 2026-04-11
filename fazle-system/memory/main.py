@@ -14,10 +14,12 @@ import uuid
 import hashlib
 from typing import Optional, List
 import os
+import time
 from datetime import datetime
 from minio import Minio
 from urllib.parse import urlparse
 import psycopg2
+import psycopg2.extras
 import psycopg2.pool
 import json as json_mod
 
@@ -45,7 +47,11 @@ class Settings(BaseSettings):
     minio_secure: bool = False
     minio_presign_expiry: int = 3600  # 1 hour
 
-    # Ollama embedding fallback (when OpenAI is unavailable)
+    # Embedding provider control: "ollama" (local-first) or "openai"
+    embedding_provider: str = "ollama"
+    embedding_fallback: str = "openai"
+
+    # Ollama embedding (primary when provider=ollama)
     ollama_url: str = "http://ollama:11434"
     ollama_embedding_model: str = "nomic-embed-text"
     ollama_embedding_dim: int = 768
@@ -81,6 +87,72 @@ def _get_db_pool() -> psycopg2.pool.SimpleConnectionPool | None:
     except Exception as e:
         logger.error(f"Failed to create PostgreSQL pool: {e}")
         return None
+
+
+# ── Embedding usage log table ─────────────────────────────────
+def _ensure_embedding_log_table():
+    pool = _get_db_pool()
+    if not pool:
+        return
+    conn = None
+    try:
+        conn = pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS embedding_usage_log (
+                    id          SERIAL PRIMARY KEY,
+                    ts          TIMESTAMPTZ DEFAULT NOW(),
+                    provider    VARCHAR(20),
+                    fallback_used BOOLEAN DEFAULT FALSE,
+                    time_ms     REAL,
+                    vector_dim  INT,
+                    text_length INT,
+                    model       VARCHAR(60)
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_embed_log_ts
+                ON embedding_usage_log(ts)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_embed_log_provider
+                ON embedding_usage_log(provider)
+            """)
+            conn.commit()
+        logger.info("embedding_usage_log table ensured")
+    except Exception as e:
+        logger.error(f"Failed to ensure embedding_usage_log: {e}")
+        if conn:
+            conn.rollback()
+    finally:
+        if conn:
+            pool.putconn(conn)
+
+
+def _log_embedding_usage(provider: str, fallback_used: bool, time_ms: float,
+                         vector_dim: int, text_length: int, model: str = None):
+    pool = _get_db_pool()
+    if not pool:
+        return
+    conn = None
+    try:
+        conn = pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO embedding_usage_log "
+                "(provider, fallback_used, time_ms, vector_dim, text_length, model) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (provider, fallback_used, round(time_ms, 1), vector_dim, text_length, model),
+            )
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"Failed to log embedding usage: {e}")
+        if conn:
+            conn.rollback()
+    finally:
+        if conn:
+            pool.putconn(conn)
+
 
 Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
@@ -163,44 +235,88 @@ async def ensure_collection():
                 pass  # Index may already exist
 
 
-async def get_embedding(text: str) -> list[float]:
-    """Get embedding vector. Tries OpenAI first, falls back to Ollama nomic-embed-text."""
-    # Try OpenAI first
-    if settings.openai_api_key:
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(
-                    "https://api.openai.com/v1/embeddings",
-                    headers={
-                        "Authorization": f"Bearer {settings.openai_api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={"model": settings.embedding_model, "input": text},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                return data["data"][0]["embedding"]
-        except Exception as e:
-            logger.warning(f"OpenAI embedding failed, falling back to Ollama: {e}")
+async def _embed_via_ollama(text: str) -> list[float]:
+    """Get embedding from Ollama (nomic-embed-text). Pads/truncates to embedding_dim."""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            f"{settings.ollama_url}/api/embeddings",
+            json={"model": settings.ollama_embedding_model, "prompt": text},
+        )
+        resp.raise_for_status()
+        embedding = resp.json()["embedding"]
+        # Pad or truncate to match expected dimension for Qdrant collection
+        if len(embedding) < settings.embedding_dim:
+            embedding += [0.0] * (settings.embedding_dim - len(embedding))
+        elif len(embedding) > settings.embedding_dim:
+            embedding = embedding[:settings.embedding_dim]
+        return embedding
 
-    # Fallback to Ollama
+
+async def _embed_via_openai(text: str) -> list[float]:
+    """Get embedding from OpenAI text-embedding-3-small (1536-dim)."""
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
+            "https://api.openai.com/v1/embeddings",
+            headers={
+                "Authorization": f"Bearer {settings.openai_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={"model": settings.embedding_model, "input": text},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["data"][0]["embedding"]
+
+
+async def get_embedding(text: str) -> list[float]:
+    """Get embedding vector. Provider controlled by EMBEDDING_PROVIDER (default: ollama).
+    Falls back to EMBEDDING_FALLBACK if primary fails."""
+    provider = settings.embedding_provider.lower()
+    fallback = settings.embedding_fallback.lower()
+    used_provider = provider
+    t0 = time.monotonic()
+
+    # ── Primary provider ──
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{settings.ollama_url}/api/embeddings",
-                json={"model": settings.ollama_embedding_model, "prompt": text},
-            )
-            resp.raise_for_status()
-            embedding = resp.json()["embedding"]
-            # Pad or truncate to match expected dimension for Qdrant collection
-            if len(embedding) < settings.embedding_dim:
-                embedding += [0.0] * (settings.embedding_dim - len(embedding))
-            elif len(embedding) > settings.embedding_dim:
-                embedding = embedding[:settings.embedding_dim]
-            return embedding
+        if provider == "ollama":
+            vec = await _embed_via_ollama(text)
+        else:
+            vec = await _embed_via_openai(text)
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        logger.info(f"Embedding OK provider={used_provider} fallback_used=false time_ms={elapsed_ms:.0f}")
+        _log_embedding_usage(
+            provider=used_provider, fallback_used=False, time_ms=elapsed_ms,
+            vector_dim=len(vec), text_length=len(text),
+            model="nomic-embed-text" if used_provider == "ollama" else "text-embedding-3-small",
+        )
+        return vec
     except Exception as e:
-        logger.error(f"Ollama embedding also failed: {e}")
-        raise HTTPException(status_code=502, detail="All embedding services unavailable")
+        logger.warning(f"Primary embedding failed (provider={provider}): {e}")
+
+    # ── Fallback provider ──
+    if fallback and fallback != provider:
+        try:
+            t0 = time.monotonic()
+            if fallback == "ollama":
+                vec = await _embed_via_ollama(text)
+            else:
+                if not settings.openai_api_key:
+                    raise RuntimeError("OpenAI API key not configured for fallback")
+                vec = await _embed_via_openai(text)
+            fallback_used = True
+            used_provider = fallback
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            logger.info(f"Embedding OK provider={used_provider} fallback_used=true time_ms={elapsed_ms:.0f}")
+            _log_embedding_usage(
+                provider=used_provider, fallback_used=True, time_ms=elapsed_ms,
+                vector_dim=len(vec), text_length=len(text),
+                model="nomic-embed-text" if used_provider == "ollama" else "text-embedding-3-small",
+            )
+            return vec
+        except Exception as e2:
+            logger.error(f"Fallback embedding also failed (provider={fallback}): {e2}")
+
+    raise HTTPException(status_code=502, detail="All embedding services unavailable")
 
 
 async def get_multimodal_embedding(text: str) -> list[float]:
@@ -237,8 +353,51 @@ def generate_presigned_url(object_name: str) -> str | None:
         return None
 
 
+# ── Knowledge fact versioning columns ───────────────────────
+def _ensure_knowledge_fact_columns():
+    """Add fact versioning columns to fazle_owner_knowledge (idempotent)."""
+    pool = _get_db_pool()
+    if not pool:
+        return
+    conn = None
+    try:
+        conn = pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE fazle_owner_knowledge ADD COLUMN IF NOT EXISTS fact_id VARCHAR(300)")
+            cur.execute("ALTER TABLE fazle_owner_knowledge ADD COLUMN IF NOT EXISTS version INT NOT NULL DEFAULT 1")
+            cur.execute("ALTER TABLE fazle_owner_knowledge ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE")
+            cur.execute("ALTER TABLE fazle_owner_knowledge ADD COLUMN IF NOT EXISTS supersedes UUID")
+            # Backfill old rows
+            cur.execute("""
+                UPDATE fazle_owner_knowledge
+                SET    fact_id = category || ':' || key
+                WHERE  fact_id IS NULL
+            """)
+            cur.execute("ALTER TABLE fazle_owner_knowledge ALTER COLUMN fact_id SET NOT NULL")
+            # Indexes
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_fact_id ON fazle_owner_knowledge(fact_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_active ON fazle_owner_knowledge(is_active)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_fact_active ON fazle_owner_knowledge(fact_id, is_active)")
+            # Partial unique: one active row per fact_id
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_fact_active
+                ON fazle_owner_knowledge(fact_id) WHERE is_active = TRUE
+            """)
+            conn.commit()
+        logger.info("Knowledge fact versioning columns ensured")
+    except Exception as e:
+        logger.warning(f"knowledge_fact_columns migration: {e}")
+        if conn:
+            conn.rollback()
+    finally:
+        if conn:
+            pool.putconn(conn)
+
+
 @app.on_event("startup")
 async def startup():
+    _ensure_embedding_log_table()
+    _ensure_knowledge_fact_columns()
     await ensure_collection()
 
 
@@ -860,6 +1019,78 @@ async def collection_metrics():
     return metrics
 
 
+# ── Embedding analytics ─────────────────────────────────────
+@app.get("/analytics/embedding-usage")
+async def analytics_embedding_usage(days: int = 7):
+    """Embedding usage analytics with provider breakdown and cost estimation."""
+    pool = _get_db_pool()
+    if not pool:
+        raise HTTPException(status_code=503, detail="Database not configured")
+    conn = None
+    try:
+        conn = pool.getconn()
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            d = int(days)
+            cur.execute("""
+                SELECT
+                    COUNT(*) as total_requests,
+                    COUNT(*) FILTER (WHERE provider = 'ollama') as ollama_count,
+                    COUNT(*) FILTER (WHERE provider = 'openai') as openai_count,
+                    COUNT(*) FILTER (WHERE fallback_used = TRUE) as fallback_count,
+                    ROUND(AVG(time_ms)::numeric, 1) as avg_time_ms,
+                    ROUND(AVG(time_ms) FILTER (WHERE provider = 'ollama')::numeric, 1) as avg_time_ollama,
+                    ROUND(AVG(time_ms) FILTER (WHERE provider = 'openai')::numeric, 1) as avg_time_openai,
+                    COALESCE(SUM(text_length), 0) as total_text_chars
+                FROM embedding_usage_log
+                WHERE ts > NOW() - INTERVAL '%s days'
+            """ % d)
+            summary = cur.fetchone()
+
+            cur.execute("""
+                SELECT model, COUNT(*) as count
+                FROM embedding_usage_log
+                WHERE ts > NOW() - INTERVAL '%s days'
+                GROUP BY model ORDER BY count DESC
+            """ % d)
+            model_rows = cur.fetchall()
+
+        total = summary["total_requests"] or 0
+        openai_count = summary["openai_count"] or 0
+        # Estimate: ~1 token per 4 chars for cost calc
+        est_openai_tokens = int(summary["total_text_chars"] or 0) // 4 if openai_count > 0 else 0
+        embed_cost = (est_openai_tokens / 1_000_000) * 0.02  # text-embedding-3-small rate
+
+        fallback_count = summary["fallback_count"] or 0
+        fallback_rate = f"{(fallback_count / total * 100):.1f}%" if total > 0 else "0%"
+
+        return {
+            "period_days": days,
+            "total_requests": total,
+            "providers": {
+                "ollama": summary["ollama_count"] or 0,
+                "openai": openai_count,
+            },
+            "fallback_rate": fallback_rate,
+            "avg_time_ms": float(summary["avg_time_ms"] or 0),
+            "avg_time_by_provider": {
+                "ollama": float(summary["avg_time_ollama"] or 0),
+                "openai": float(summary["avg_time_openai"] or 0),
+            },
+            "models": {r["model"]: r["count"] for r in model_rows},
+            "cost_estimation": {
+                "total_usd": round(embed_cost, 6),
+                "ollama_cost": 0.0,
+                "note": "Ollama embeddings are free; OpenAI cost estimated from text-embedding-3-small rates",
+            },
+            "total_text_chars": summary["total_text_chars"],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            pool.putconn(conn)
+
+
 # ── Owner Knowledge — Structured PostgreSQL storage ─────────
 
 KNOWLEDGE_CATEGORIES = {
@@ -867,6 +1098,67 @@ KNOWLEDGE_CATEGORIES = {
     "social", "religious", "financial", "health", "tech",
     "preference", "education", "ideology",
 }
+
+# ── Fact type mapping ───────────────────────────────────────
+_FACT_TYPE_ALIASES = {
+    "name": "owner_name", "full_name": "owner_name",
+    "company": "company_name", "business_name": "company_name",
+    "address": "company_address", "office_address": "company_address",
+    "service": "service_type", "services": "service_type",
+    "price": "pricing", "rate": "pricing", "cost": "pricing",
+}
+
+
+def map_field_to_fact_id(category: str, key: str) -> str:
+    """Normalize category:key into a canonical fact_id."""
+    normalized_key = key.strip().lower().replace(" ", "_")
+    normalized_key = _FACT_TYPE_ALIASES.get(normalized_key, normalized_key)
+    return f"{category.strip().lower()}:{normalized_key}"
+
+
+def _versioned_upsert(conn, category: str, subcategory: str, key: str,
+                      value: str, language: str, confidence: float,
+                      source: str, metadata: dict) -> tuple:
+    """Insert new knowledge fact with version tracking.
+    Returns (id, action) where action is 'created', 'updated', or 'skipped_duplicate'.
+    """
+    fact_id = map_field_to_fact_id(category, key)
+    with conn.cursor() as cur:
+        # Find current active fact
+        cur.execute(
+            "SELECT id, value, version FROM fazle_owner_knowledge "
+            "WHERE fact_id = %s AND is_active = TRUE LIMIT 1",
+            (fact_id,),
+        )
+        existing = cur.fetchone()
+
+        # Conflict safety: skip if value unchanged
+        if existing and existing[1] == value:
+            return str(existing[0]), "skipped_duplicate"
+
+        old_id = existing[0] if existing else None
+        old_ver = existing[2] if existing else 0
+
+        # Deactivate old version
+        if old_id:
+            cur.execute(
+                "UPDATE fazle_owner_knowledge SET is_active = FALSE, updated_at = NOW() "
+                "WHERE id = %s", (old_id,),
+            )
+
+        # Insert new active version
+        cur.execute(
+            "INSERT INTO fazle_owner_knowledge "
+            "(category, subcategory, key, value, language, confidence, source, metadata, "
+            " fact_id, version, is_active, supersedes) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s) "
+            "RETURNING id",
+            (category, subcategory, key, value, language, confidence, source,
+             json_mod.dumps(metadata), fact_id, old_ver + 1, old_id),
+        )
+        new_id = cur.fetchone()[0]
+        action = "updated" if old_id else "created"
+        return str(new_id), action
 
 
 class KnowledgeStoreRequest(BaseModel):
@@ -895,22 +1187,20 @@ async def store_knowledge(request: KnowledgeStoreRequest):
 
     conn = pool.getconn()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT upsert_owner_knowledge(%s, %s, %s, %s, %s, %s, %s, %s)",
-                (
-                    request.category,
-                    request.subcategory,
-                    request.key,
-                    request.value,
-                    request.language,
-                    request.confidence,
-                    request.source,
-                    json_mod.dumps(request.metadata),
-                ),
-            )
-            result_id = cur.fetchone()[0]
+        result_id, action = _versioned_upsert(
+            conn,
+            category=request.category,
+            subcategory=request.subcategory,
+            key=request.key,
+            value=request.value,
+            language=request.language,
+            confidence=request.confidence,
+            source=request.source,
+            metadata=request.metadata,
+        )
         conn.commit()
+        fact_id = map_field_to_fact_id(request.category, request.key)
+        logger.info(f"fact_{action} fact_id={fact_id} id={result_id}")
     except Exception as e:
         conn.rollback()
         logger.error(f"Knowledge store failed: {e}")
@@ -948,7 +1238,14 @@ async def store_knowledge(request: KnowledgeStoreRequest):
     except Exception as e:
         logger.warning(f"Qdrant mirror for knowledge failed (non-fatal): {e}")
 
-    return {"status": "stored", "id": str(result_id), "category": request.category, "key": request.key}
+    return {
+        "status": "stored",
+        "id": str(result_id),
+        "category": request.category,
+        "key": request.key,
+        "fact_id": map_field_to_fact_id(request.category, request.key),
+        "action": action,
+    }
 
 
 class KnowledgeSearchRequest(BaseModel):
@@ -976,7 +1273,9 @@ async def search_knowledge(request: KnowledgeSearchRequest):
                 conditions.append("(key ILIKE %s OR value ILIKE %s)")
                 like = f"%{request.query}%"
                 params.extend([like, like])
-            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+            # Only return active facts (single source of truth)
+            conditions.append("is_active = TRUE")
+            where = f"WHERE {' AND '.join(conditions)}"
             cur.execute(
                 f"SELECT id, category, subcategory, key, value, language, confidence, source, metadata, created_at "
                 f"FROM fazle_owner_knowledge {where} ORDER BY updated_at DESC LIMIT %s",
@@ -1018,7 +1317,8 @@ async def list_knowledge_categories():
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT category, COUNT(*) as count FROM fazle_owner_knowledge GROUP BY category ORDER BY count DESC"
+                "SELECT category, COUNT(*) as count FROM fazle_owner_knowledge "
+                "WHERE is_active = TRUE GROUP BY category ORDER BY count DESC"
             )
             rows = cur.fetchall()
     except Exception as e:
@@ -1028,6 +1328,256 @@ async def list_knowledge_categories():
         pool.putconn(conn)
 
     return {"categories": [{"category": r[0], "count": r[1]} for r in rows]}
+
+
+@app.get("/knowledge/history")
+async def knowledge_history(fact_id: str, limit: int = 50):
+    """Return all versions of a fact (active + inactive) for audit."""
+    pool = _get_db_pool()
+    if not pool:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    conn = pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, category, subcategory, key, value, language, confidence, "
+                "       source, metadata, fact_id, version, is_active, supersedes, "
+                "       created_at, updated_at "
+                "FROM fazle_owner_knowledge "
+                "WHERE fact_id = %s "
+                "ORDER BY version DESC LIMIT %s",
+                (fact_id, limit),
+            )
+            rows = cur.fetchall()
+    except Exception as e:
+        logger.error(f"Knowledge history query failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch history")
+    finally:
+        pool.putconn(conn)
+
+    versions = []
+    for r in rows:
+        versions.append({
+            "id": str(r["id"]),
+            "version": r["version"],
+            "is_active": r["is_active"],
+            "value": r["value"],
+            "confidence": r["confidence"],
+            "source": r["source"],
+            "supersedes": str(r["supersedes"]) if r["supersedes"] else None,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+        })
+
+    return {
+        "fact_id": fact_id,
+        "total_versions": len(versions),
+        "current": versions[0] if versions else None,
+        "history": versions,
+    }
+
+
+# ── Smart Retrieval & Context Optimization ──────────────────
+
+# Category importance weights
+_CATEGORY_WEIGHT = {
+    "business": 3, "personal": 3,
+    "financial": 2, "health": 2, "tech": 2,
+    "family": 1, "education": 1, "preference": 1,
+    "social": 0, "daily": 0, "political": 0,
+    "religious": 0, "ideology": 0,
+}
+
+# Source priority weights
+_SOURCE_WEIGHT = {
+    "owner": 5, "owner_chat": 4, "manual": 4,
+    "admin": 3, "api": 2, "system": 1,
+    "auto_extract": 1,
+}
+
+
+def _extract_keywords(query: str) -> list[str]:
+    """Extract meaningful keywords from a query string."""
+    stop_words = {
+        "the", "is", "a", "an", "of", "in", "to", "for", "and", "or", "what",
+        "which", "how", "who", "where", "when", "do", "does", "can", "your",
+        "my", "our", "their", "this", "that", "it", "are", "was", "were", "be",
+        "been", "have", "has", "had", "will", "would", "could", "should",
+        "ki", "kি", "কি", "কে", "তা", "এটা", "সেটা", "আমার", "আপনার",
+        "তোমার", "হলো", "করে", "এবং", "বা", "না", "হ্যাঁ",
+    }
+    words = query.lower().replace("?", " ").replace(".", " ").replace(",", " ").split()
+    return [w.strip() for w in words if len(w) > 1 and w not in stop_words]
+
+
+def _score_fact(fact: dict, keywords: list[str], now_ts: float) -> float:
+    """Score a knowledge fact for relevance and priority."""
+    score = 0.0
+
+    # Recency bonus (max 3 points, decays over 7 days)
+    updated_at = fact.get("updated_at")
+    if updated_at:
+        try:
+            if isinstance(updated_at, str):
+                from datetime import datetime as _dt
+                ts = _dt.fromisoformat(updated_at.replace("Z", "+00:00")).timestamp()
+            else:
+                ts = updated_at.timestamp()
+            age_days = (now_ts - ts) / 86400
+            if age_days < 1:
+                score += 3.0
+            elif age_days < 7:
+                score += 2.0
+            elif age_days < 30:
+                score += 1.0
+        except Exception:
+            pass
+
+    # Category importance
+    category = fact.get("category", "")
+    score += _CATEGORY_WEIGHT.get(category, 0)
+
+    # Source priority
+    source = fact.get("source", "")
+    score += _SOURCE_WEIGHT.get(source, 0)
+
+    # Confidence boost
+    confidence = fact.get("confidence", 1.0)
+    if confidence and confidence >= 0.9:
+        score += 1.0
+
+    # Keyword match boost (check fact_id, category, key, value)
+    if keywords:
+        searchable = " ".join([
+            fact.get("fact_id", ""),
+            fact.get("category", ""),
+            fact.get("key", ""),
+            fact.get("value", ""),
+        ]).lower()
+        matches = sum(1 for kw in keywords if kw in searchable)
+        score += min(matches * 2.0, 6.0)  # max 6 from keyword matching
+
+    return round(score, 1)
+
+
+def _build_clean_context(facts: list[dict]) -> str:
+    """Format scored facts into a clean context string for LLM injection."""
+    if not facts:
+        return ""
+    lines = ["FACTS:"]
+    seen = set()
+    for f in facts:
+        key = f.get("key", "")
+        value = f.get("value", "")
+        if not key or not value:
+            continue
+        # Deduplicate by key
+        dedup = key.lower()
+        if dedup in seen:
+            continue
+        seen.add(dedup)
+        # Format: human-readable key
+        label = key.replace("_", " ").title()
+        lines.append(f"- {label}: {value}")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+@app.get("/knowledge/retrieve")
+async def knowledge_retrieve(query: str, limit: int = 10, category: str = None):
+    """Smart knowledge retrieval with scoring, keyword matching, and clean context.
+    Returns only active facts, scored and ranked, with formatted context.
+    """
+    pool = _get_db_pool()
+    if not pool:
+        raise HTTPException(status_code=503, detail="Database not configured")
+
+    keywords = _extract_keywords(query)
+    now_ts = time.time()
+    limit = min(max(limit, 1), 20)
+
+    conn = pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Fetch all active facts (filtered by category if provided)
+            conditions = ["is_active = TRUE"]
+            params: list = []
+            if category:
+                conditions.append("category = %s")
+                params.append(category)
+            # Keyword-based filtering: if keywords exist, filter to relevant rows
+            if keywords:
+                kw_conditions = []
+                for kw in keywords[:8]:  # cap at 8 keywords
+                    kw_conditions.append("(key ILIKE %s OR value ILIKE %s OR fact_id ILIKE %s)")
+                    like = f"%{kw}%"
+                    params.extend([like, like, like])
+                conditions.append(f"({' OR '.join(kw_conditions)})")
+
+            where = f"WHERE {' AND '.join(conditions)}"
+            cur.execute(
+                f"SELECT id, category, subcategory, key, value, language, confidence, "
+                f"       source, metadata, fact_id, version, is_active, "
+                f"       created_at, updated_at "
+                f"FROM fazle_owner_knowledge {where} "
+                f"ORDER BY updated_at DESC LIMIT 50",
+                params,
+            )
+            rows = cur.fetchall()
+    except Exception as e:
+        logger.error(f"Smart retrieval query failed: {e}")
+        raise HTTPException(status_code=500, detail="Retrieval failed")
+    finally:
+        pool.putconn(conn)
+
+    # Score and rank
+    scored = []
+    for row in rows:
+        fact = dict(row)
+        fact["score"] = _score_fact(fact, keywords, now_ts)
+        scored.append(fact)
+    scored.sort(key=lambda f: f["score"], reverse=True)
+
+    # Priority order: owner facts → business → rest (already handled by scoring)
+    selected = scored[:limit]
+    skipped = scored[limit:]
+
+    # Build clean context
+    context = _build_clean_context(selected)
+
+    # Debug logging
+    logger.info(
+        f"Smart retrieval: query='{query[:60]}' keywords={keywords[:5]} "
+        f"matched={len(rows)} selected={len(selected)} skipped={len(skipped)}"
+    )
+    for f in selected[:5]:
+        logger.debug(f"  SELECTED: fact_id={f.get('fact_id')} score={f['score']} key={f.get('key')}")
+    for f in skipped[:3]:
+        logger.debug(f"  SKIPPED: fact_id={f.get('fact_id')} score={f['score']} key={f.get('key')}")
+
+    # Response
+    facts_out = []
+    for f in selected:
+        facts_out.append({
+            "fact_id": f.get("fact_id"),
+            "category": f.get("category"),
+            "key": f.get("key"),
+            "value": f.get("value"),
+            "version": f.get("version"),
+            "confidence": f.get("confidence"),
+            "source": f.get("source"),
+            "score": f["score"],
+            "updated_at": f["updated_at"].isoformat() if f.get("updated_at") else None,
+        })
+
+    return {
+        "query": query,
+        "keywords": keywords,
+        "total_matched": len(rows),
+        "selected_count": len(selected),
+        "facts": facts_out,
+        "context": context,
+    }
 
 
 # ══════════════════════════════════════════════════════════════

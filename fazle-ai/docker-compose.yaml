@@ -152,6 +152,8 @@ services:
       VECTOR_DB_URL: "http://qdrant:6333"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       EMBEDDING_MODEL: "text-embedding-3-small"
+      EMBEDDING_PROVIDER: "ollama"
+      EMBEDDING_FALLBACK: "openai"
       COLLECTION_NAME: "fazle_memories"
       MULTIMODAL_COLLECTION: "fazle_memories_multimodal"
       MULTIMODAL_EMBEDDING_DIM: "3072"

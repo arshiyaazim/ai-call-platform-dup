@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fazle Admin Dashboard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh}
+.header{background:#1e293b;padding:16px 24px;border-bottom:1px solid #334155;display:flex;justify-content:space-between;align-items:center}
+.header h1{font-size:20px;color:#38bdf8}
+.header .refresh{background:#334155;color:#e2e8f0;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px}
+.header .refresh:hover{background:#475569}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;padding:20px 24px}
+.card{background:#1e293b;border-radius:10px;padding:20px;border:1px solid #334155}
+.card h2{font-size:14px;color:#94a3b8;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px}
+.stat{font-size:32px;font-weight:700;color:#38bdf8}
+.stat-label{font-size:12px;color:#64748b;margin-top:4px}
+.stat-row{display:flex;gap:24px;margin-top:8px}
+.stat-item{text-align:center}
+.stat-item .num{font-size:22px;font-weight:600}
+.stat-item .lbl{font-size:11px;color:#64748b}
+.success{color:#4ade80} .fail{color:#f87171} .warn{color:#fbbf24}
+.section{padding:0 24px 20px}
+.section h2{font-size:16px;color:#94a3b8;margin-bottom:12px;padding-top:8px;border-top:1px solid #334155}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:8px 12px;background:#334155;color:#94a3b8;font-weight:500}
+td{padding:8px 12px;border-bottom:1px solid #1e293b}
+tr:hover td{background:#1e293b}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.badge-success{background:#064e3b;color:#4ade80}
+.badge-error{background:#7f1d1d;color:#f87171}
+.badge-rolled{background:#78350f;color:#fbbf24}
+.btn-rollback{background:#7f1d1d;color:#fca5a5;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px}
+.btn-rollback:hover{background:#991b1b}
+.btn-rollback:disabled{opacity:0.4;cursor:not-allowed}
+.tabs{display:flex;gap:4px;padding:0 24px;margin-top:16px}
+.tab{padding:8px 16px;border-radius:6px 6px 0 0;background:#1e293b;color:#94a3b8;border:none;cursor:pointer;font-size:13px}
+.tab.active{background:#334155;color:#e2e8f0}
+.tab-content{display:none}.tab-content.active{display:block}
+.fact-card{background:#0f172a;border:1px solid #334155;border-radius:6px;padding:12px;margin-bottom:8px}
+.fact-key{color:#38bdf8;font-weight:600;font-size:13px}
+.fact-val{color:#e2e8f0;font-size:14px;margin-top:4px}
+.fact-meta{font-size:11px;color:#64748b;margin-top:6px}
+.empty{text-align:center;padding:40px;color:#64748b}
+.badge-pending{background:#1e3a5f;color:#60a5fa}
+.badge-approved{background:#064e3b;color:#4ade80}
+.badge-executed{background:#1e293b;color:#94a3b8}
+.badge-dismissed{background:#334155;color:#64748b}
+.btn-approve{background:#064e3b;color:#4ade80;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px}
+.btn-approve:hover{background:#065f46}
+.btn-dismiss{background:#334155;color:#94a3b8;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px;margin-left:4px}
+.btn-dismiss:hover{background:#475569}
+.btn-scan{background:#1e3a5f;color:#60a5fa;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px;margin-bottom:12px}
+.btn-scan:hover{background:#1e4b8f}
+.priority-high{color:#f87171;font-weight:600}
+.priority-medium{color:#fbbf24}
+.priority-low{color:#4ade80}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>🛡️ Fazle Admin Dashboard</h1>
+  <button class="refresh" onclick="loadAll()">↻ Refresh</button>
+</div>
+
+<div class="grid" id="overview-cards"></div>
+
+<div class="tabs">
+  <button class="tab" onclick="switchTab('recs')">🤖 Recommendations</button>
+  <button class="tab active" onclick="switchTab('actions')">Actions</button>
+  <button class="tab" onclick="switchTab('knowledge')">Knowledge</button>
+  <button class="tab" onclick="switchTab('llm')">LLM Usage</button>
+  <button class="tab" onclick="switchTab('metrics')">Metrics</button>
+  <button class="tab" onclick="switchTab('learning')">🧠 Learning</button>
+</div>
+
+<div id="tab-recs" class="tab-content section"></div>
+<div id="tab-actions" class="tab-content active section"></div>
+<div id="tab-knowledge" class="tab-content section"></div>
+<div id="tab-llm" class="tab-content section"></div>
+<div id="tab-metrics" class="tab-content section"></div>
+<div id="tab-learning" class="tab-content section"></div>
+
+<script>
+const BASE = window.location.origin;
+
+function switchTab(name) {
+  const tabs = ['recs','actions','knowledge','llm','metrics','learning'];
+  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active', tabs[i]===name));
+  document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
+  document.getElementById('tab-'+name).classList.add('active');
+}
+
+async function api(path) {
+  try { const r = await fetch(BASE+path); return await r.json(); }
+  catch(e) { return {error: e.message}; }
+}
+
+function escHtml(s) { const d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
+
+async function loadRecommendations() {
+  const d = await api('/recommendations?limit=40');
+  const recs = d.recommendations || [];
+  const stats = d.stats || {};
+  let html = `<button class="btn-scan" onclick="triggerScan()">⚡ Run Intelligence Scan</button>`;
+  html += `<div style="margin-bottom:12px;font-size:13px;color:#94a3b8">
+    Pending: <b class="warn">${stats.pending||0}</b> | 
+    Approved: <b class="success">${stats.approved||0}</b> | 
+    Executed: <b>${stats.executed||0}</b> | 
+    Dismissed: <b style="color:#64748b">${stats.dismissed||0}</b>
+  </div>`;
+  if (!recs.length) { document.getElementById('tab-recs').innerHTML=html+'<div class="empty">No recommendations yet. Run a scan to detect events.</div>'; return; }
+  html += '<table><tr><th>ID</th><th>Time</th><th>Event</th><th>Entity</th><th>Suggestion</th><th>Priority</th><th>Status</th><th></th></tr>';
+  for (const r of recs) {
+    const pCls = r.urgency==='high'?'priority-high':r.urgency==='medium'?'priority-medium':'priority-low';
+    const badge = r.status==='pending'?'badge-pending':r.status==='approved'?'badge-approved':r.status==='executed'?'badge-executed':'badge-dismissed';
+    const btns = r.status==='pending'?`<button class="btn-approve" onclick="approveRec(${r.id})">✓ Approve</button><button class="btn-dismiss" onclick="dismissRec(${r.id})">✗</button>`:'';
+    html += `<tr>
+      <td>${r.id}</td>
+      <td>${r.created_at?new Date(r.created_at).toLocaleString():'-'}</td>
+      <td>${escHtml(r.event_type)}</td>
+      <td>${escHtml(r.entity_name||'')}</td>
+      <td>${escHtml(r.message)}</td>
+      <td class="${pCls}">${(r.priority_score||0).toFixed(2)} (${r.urgency})</td>
+      <td><span class="badge ${badge}">${r.status.toUpperCase()}</span></td>
+      <td>${btns}</td>
+    </tr>`;
+  }
+  html += '</table>';
+  document.getElementById('tab-recs').innerHTML = html;
+}
+
+async function approveRec(id) {
+  if (!confirm('Approve and execute recommendation #'+id+'?')) return;
+  try {
+    const r = await fetch(BASE+'/recommendations/'+id+'/approve', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({execute:true})});
+    const d = await r.json();
+    alert(d.message || d.detail || 'Done');
+    loadAll();
+  } catch(e) { alert('Error: '+e.message); }
+}
+
+async function dismissRec(id) {
+  if (!confirm('Dismiss recommendation #'+id+'?')) return;
+  try {
+    const r = await fetch(BASE+'/recommendations/'+id+'/dismiss', {method:'POST'});
+    const d = await r.json();
+    alert(d.message || d.detail || 'Dismissed');
+    loadAll();
+  } catch(e) { alert('Error: '+e.message); }
+}
+
+async function triggerScan() {
+  try {
+    const r = await fetch(BASE+'/recommendations/scan', {method:'POST'});
+    const d = await r.json();
+    alert(`Scan complete: ${d.new_recommendations||0} new recommendations, ${d.auto_executed||0} auto-executed`);
+    loadAll();
+  } catch(e) { alert('Error: '+e.message); }
+}
+
+async function loadOverview() {
+  const d = await api('/dashboard/overview');
+  const m = await api('/analytics/action-metrics');
+  const rs = await api('/recommendations/stats');
+  const st = rs.stats || {};
+  document.getElementById('overview-cards').innerHTML = `
+    <div class="card"><h2>Total Actions</h2><div class="stat">${d.total_actions||0}</div></div>
+    <div class="card"><h2>Success Rate</h2><div class="stat ${(d.success_rate||0)>80?'success':'warn'}">${d.success_rate||0}%</div></div>
+    <div class="card"><h2>Pending Recommendations</h2><div class="stat warn">${st.pending||0}</div>
+      <div class="stat-label">${st.total||0} total / ${st.executed||0} executed</div></div>
+    <div class="card"><h2>Workflows</h2><div class="stat">${(d.workflows||[]).length}</div>
+      <div class="stat-label">${(d.workflows||[]).join(', ')||'none'}</div></div>
+  `;
+}
+
+async function loadActions() {
+  const d = await api('/dashboard/actions?limit=30');
+  if (!d.actions||!d.actions.length) { document.getElementById('tab-actions').innerHTML='<div class="empty">No actions yet</div>'; return; }
+  let html = '<table><tr><th>ID</th><th>Time</th><th>Action</th><th>Status</th><th>ms</th><th>Details</th><th></th></tr>';
+  for (const a of d.actions) {
+    const st = a.rolled_back ? '<span class="badge badge-rolled">ROLLED BACK</span>'
+             : a.status==='success' ? '<span class="badge badge-success">OK</span>'
+             : '<span class="badge badge-error">FAIL</span>';
+    const canRb = a.status==='success' && !a.rolled_back;
+    html += `<tr>
+      <td>${a.id}</td>
+      <td>${a.timestamp?new Date(a.timestamp).toLocaleString():'-'}</td>
+      <td>${escHtml(a.action_type)}</td>
+      <td>${st}</td>
+      <td>${a.execution_time_ms||0}</td>
+      <td>${escHtml(a.error_message||a.result_data?.message||'')}</td>
+      <td>${canRb?`<button class="btn-rollback" onclick="doRollback(${a.id})">Rollback</button>`:''}</td>
+    </tr>`;
+  }
+  html += '</table>';
+  document.getElementById('tab-actions').innerHTML = html;
+}
+
+async function loadKnowledge() {
+  const d = await api('/dashboard/knowledge?limit=40');
+  if (!d.facts||!d.facts.length) { document.getElementById('tab-knowledge').innerHTML='<div class="empty">No knowledge facts</div>'; return; }
+  let html = '';
+  for (const f of d.facts) {
+    html += `<div class="fact-card">
+      <div class="fact-key">${escHtml(f.category)} / ${escHtml(f.key)}</div>
+      <div class="fact-val">${escHtml(f.value)}</div>
+      <div class="fact-meta">Source: ${escHtml(f.source)} | v${f.version||1} | ${f.updated_at?new Date(f.updated_at).toLocaleString():''}</div>
+    </div>`;
+  }
+  document.getElementById('tab-knowledge').innerHTML = html;
+}
+
+async function loadLLM() {
+  const d = await api('/dashboard/llm-usage?limit=30');
+  if (!d.usage||!d.usage.length) { document.getElementById('tab-llm').innerHTML='<div class="empty">No LLM usage data</div>'; return; }
+  let html = '<table><tr><th>ID</th><th>Time</th><th>Provider</th><th>Model</th><th>Fallback</th><th>ms</th><th>Type</th><th>Reply</th></tr>';
+  for (const u of d.usage) {
+    html += `<tr>
+      <td>${u.id}</td>
+      <td>${u.timestamp?new Date(u.timestamp).toLocaleString():'-'}</td>
+      <td>${escHtml(u.provider)}</td><td>${escHtml(u.model)}</td>
+      <td>${u.is_fallback?'<span class="warn">YES</span>':'no'}</td>
+      <td>${u.latency_ms||'-'}</td>
+      <td>${escHtml(u.request_type||'')}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(u.reply_preview||'')}</td>
+    </tr>`;
+  }
+  html += '</table>';
+  document.getElementById('tab-llm').innerHTML = html;
+}
+
+async function loadMetrics() {
+  const d = await api('/analytics/action-metrics');
+  if (!d.actions||!Object.keys(d.actions).length) { document.getElementById('tab-metrics').innerHTML='<div class="empty">No metrics yet</div>'; return; }
+  let html = '<table><tr><th>Action</th><th>Total</th><th>Success</th><th>Fail</th><th>Rate</th><th>Avg ms</th><th>Last Error</th></tr>';
+  for (const [name, m] of Object.entries(d.actions)) {
+    html += `<tr>
+      <td>${escHtml(name)}</td><td>${m.total}</td>
+      <td class="success">${m.success}</td><td class="fail">${m.fail}</td>
+      <td>${m.success_rate}%</td><td>${m.avg_ms}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">${escHtml(m.last_error||'')}</td>
+    </tr>`;
+  }
+  html += '</table>';
+  if (d.registry) {
+    html += '<h2 style="margin-top:20px">Registry</h2><table><tr><th>Action</th><th>Risk</th><th>Confirm</th><th>Required</th><th>Description</th></tr>';
+    for (const [name, r] of Object.entries(d.registry)) {
+      html += `<tr><td>${escHtml(name)}</td><td>${r.risk}</td><td>${r.needs_confirmation?'yes':'no'}</td>
+        <td>${(r.required_fields||[]).join(', ')}</td><td>${escHtml(r.description)}</td></tr>`;
+    }
+    html += '</table>';
+  }
+  document.getElementById('tab-metrics').innerHTML = html;
+}
+
+async function doRollback(id) {
+  if (!confirm('Rollback action #'+id+'?')) return;
+  try {
+    const r = await fetch(BASE+'/actions/rollback', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action_id:id, user_role:'owner'})});
+    const d = await r.json();
+    alert(d.message || d.detail || 'Done');
+    loadAll();
+  } catch(e) { alert('Error: '+e.message); }
+}
+
+function loadAll() { loadOverview(); loadRecommendations(); loadActions(); loadKnowledge(); loadLLM(); loadMetrics(); loadLearning(); }
+loadAll();
+setInterval(loadAll, 30000);
+
+async function loadLearning() {
+  const d = await api('/recommendations/learning');
+  const l = d.learning || {};
+  const weights = l.weights || [];
+  const patterns = l.patterns || [];
+  let html = `<div style="margin-bottom:12px;font-size:13px;color:#94a3b8">
+    Total Feedback Events: <b class="warn">${l.total_feedback||0}</b> |
+    Learned Patterns: <b class="success">${patterns.length}</b>
+  </div>`;
+  if (!weights.length) { document.getElementById('tab-learning').innerHTML=html+'<div class="empty">No learning data yet. Approve or dismiss recommendations to start learning.</div>'; return; }
+  html += '<h2>Learning Weights</h2><table><tr><th>Event</th><th>Action</th><th>Weight</th><th>Approved</th><th>Dismissed</th><th>Approval Rate</th><th>Last Updated</th></tr>';
+  for (const w of weights) {
+    const wCls = w.weight>1.2?'success':w.weight<0.5?'fail':'warn';
+    html += `<tr>
+      <td>${escHtml(w.event_type)}</td><td>${escHtml(w.action)}</td>
+      <td class="${wCls}">${w.weight}</td>
+      <td class="success">${w.approve_count}</td><td class="fail">${w.dismiss_count}</td>
+      <td>${(w.approval_rate*100).toFixed(0)}%</td>
+      <td>${w.last_updated?new Date(w.last_updated).toLocaleString():'-'}</td>
+    </tr>`;
+  }
+  html += '</table>';
+  if (patterns.length) {
+    html += '<h2 style="margin-top:20px">Detected Patterns</h2><table><tr><th>Event</th><th>Action</th><th>Pattern</th><th>Approval Rate</th><th>Weight</th></tr>';
+    for (const p of patterns) {
+      const pBadge = p.pattern==='consistently_approved'?'badge-approved':'badge-dismissed';
+      html += `<tr>
+        <td>${escHtml(p.event_type)}</td><td>${escHtml(p.action)}</td>
+        <td><span class="badge ${pBadge}">${p.pattern.replace('_',' ').toUpperCase()}</span></td>
+        <td>${(p.approval_rate*100).toFixed(0)}%</td><td>${p.weight}</td>
+      </tr>`;
+    }
+    html += '</table>';
+  }
+  document.getElementById('tab-learning').innerHTML = html;
+}
+</script>
+</body>
+</html>

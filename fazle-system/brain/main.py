@@ -5,7 +5,7 @@
 # ============================================================
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, HTMLResponse
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -18,7 +18,7 @@ from typing import Optional
 import os
 from datetime import datetime
 from memory_manager import conversation_get, conversation_set
-from context_builder import build_knowledge_context, detect_intents, normalize_text, KNOWLEDGE_FALLBACK_BN, get_cached_context, set_cached_context
+from context_builder import build_knowledge_context, build_smart_context, detect_intents, normalize_text, KNOWLEDGE_FALLBACK_BN, get_cached_context, set_cached_context
 from intent_engine import process_social_intent, _get_state as _get_intent_state
 from lead_capture import try_capture_lead
 from persona_engine import build_system_prompt, build_system_prompt_async
@@ -30,6 +30,7 @@ from persona_engine import (
     build_identity_context,
 )
 from memory_manager import (
+    _get_redis,
     user_history_get, user_history_append,
     user_replies_get, user_replies_track,
     owner_pending_action_set, owner_pending_action_get, owner_pending_action_clear,
@@ -54,6 +55,25 @@ from teaching_pipeline import UnifiedTeachingPipeline
 from owner_control.knowledge_lifecycle import KnowledgeLifecycleEngine
 from owner_control.owner_policy import OwnerPolicyEngine
 from owner_control.response_playbooks import ConfusionHandler
+from action_engine import (
+    is_registered_action, execute_registered_action,
+    get_action_def, action_needs_confirmation,
+    ensure_action_tables, get_action_metrics,
+    ACTION_REGISTRY,
+    detect_action_rule, rollback_action,
+    execute_workflow, WORKFLOW_REGISTRY,
+    can_execute, can_rollback,
+)
+from autonomous_intelligence import (
+    ensure_recommendation_tables,
+    periodic_intelligence_scan,
+    get_pending_recommendations,
+    get_all_recommendations,
+    get_recommendation_stats,
+    approve_recommendation,
+    dismiss_recommendation,
+    get_learning_stats,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("fazle-brain")
@@ -94,20 +114,6 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-
-# Shared HTTP client for ultra-fast Ollama calls (avoids per-request connection setup)
-_fast_ollama_client: httpx.AsyncClient | None = None
-
-
-def _get_fast_client() -> httpx.AsyncClient:
-    global _fast_ollama_client
-    if _fast_ollama_client is None or _fast_ollama_client.is_closed:
-        _fast_ollama_client = httpx.AsyncClient(
-            base_url=settings.ollama_url,
-            timeout=httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0),
-        )
-    return _fast_ollama_client
-
 
 app = FastAPI(title="Fazle Brain — Reasoning Engine", version="2.0.0")
 
@@ -171,44 +177,27 @@ async def init_agents():
         knowledge_lifecycle.ensure_tables()
         owner_policy = OwnerPolicyEngine(dsn=_dsn)
         owner_policy.ensure_tables()
+        _ensure_action_audit_table(_dsn)
+        ensure_action_tables(_dsn)
+        ensure_recommendation_tables(_dsn)
         confusion_handler = ConfusionHandler()
-        logger.info("Production modules initialized: teaching_pipeline, knowledge_lifecycle, owner_policy, confusion_handler")
+        logger.info("Production modules initialized: teaching_pipeline, knowledge_lifecycle, owner_policy, action_engine, autonomous_intelligence, confusion_handler")
+
+        # Phase 10: Background intelligence scanner
+        async def _intelligence_loop():
+            while True:
+                try:
+                    await asyncio.sleep(300)  # 5 min
+                    _bg_dsn = os.getenv("FAZLE_DATABASE_URL", "postgresql://postgres:postgres@postgres:5432/postgres")
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, periodic_intelligence_scan, _bg_dsn)
+                except Exception as _bg_err:
+                    logger.debug(f"Intelligence scan cycle error: {_bg_err}")
+
+        asyncio.ensure_future(_intelligence_loop())
     except Exception as e:
         logger.warning(f"Production module init failed (non-fatal): {e}")
 
-    # Start Ollama pre-warm background task
-    asyncio.create_task(_ollama_prewarm_loop())
-
-
-_ollama_busy = False  # Guard to prevent prewarm during active requests
-
-
-async def _ollama_prewarm_loop():
-    """Ping Ollama every 2 minutes with a tiny prompt to keep the model loaded in RAM.
-    Prevents cold-start delays on the memory-constrained VPS."""
-    await asyncio.sleep(5)  # let startup finish
-    while True:
-        if _ollama_busy:
-            logger.debug("Ollama pre-warm: skipped, request in-flight")
-        else:
-            try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    resp = await client.post(
-                        f"{settings.ollama_url}/api/chat",
-                        json={
-                            "model": settings.ollama_model,
-                            "messages": [{"role": "user", "content": "hi"}],
-                            "stream": False,
-                            "options": {"num_predict": 1},
-                        },
-                    )
-                    if resp.status_code == 200:
-                        logger.debug("Ollama pre-warm: model kept hot")
-                    else:
-                        logger.warning(f"Ollama pre-warm: status {resp.status_code}")
-            except Exception as e:
-                logger.warning(f"Ollama pre-warm failed: {e}")
-        await asyncio.sleep(120)  # every 2 minutes
 
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "https://fazle.iamazim.com,https://iamazim.com").split(",")
 
@@ -246,12 +235,8 @@ Respond in JSON with these fields:
 """
 
 
-# ── LLM Failover Constants ────────────────────────────────────
+# ── LLM Gateway Constants ────────────────────────────────────
 _LLM_TIMEOUT_GATEWAY = 20.0    # Gateway: 20s
-_LLM_TIMEOUT_OPENAI = 5.0     # Direct OpenAI: 5s per-provider cap
-_LLM_TIMEOUT_OLLAMA = 50.0    # Local Ollama: 50s (handles cold-start + larger prompts on CPU)
-_LLM_TIMEOUT_FAST = 8.0       # Fast model fallback: 8s cap
-_LLM_PARALLEL_GLOBAL = 55.0   # Global parallel timeout: 55s max total
 
 _FALLBACK_REPLY_BN = "দুঃখিত, একটু সমস্যা হয়েছে। আবার বলবেন?"
 _FALLBACK_REPLY_EN = "Sorry, having a small issue. Please try again shortly."
@@ -301,157 +286,57 @@ def _humanize_reply(reply: str) -> str:
     return reply
 
 
-async def query_openai(messages: list[dict]) -> dict:
-    """Call OpenAI API for reasoning (direct, used as fallback)."""
-    async with httpx.AsyncClient(timeout=_LLM_TIMEOUT_OPENAI) as client:
+async def query_gateway(messages: list[dict], model: str = None, max_tokens: int = None,
+                        caller: str = "fazle-brain", request_type: str = "user_chat") -> dict:
+    """Call LLM Gateway — the ONLY LLM entry point. Gateway handles provider routing and fallback."""
+    payload = {
+        "messages": messages,
+        "response_format": "json",
+        "caller": caller,
+        "temperature": 0.7,
+        "request_type": request_type,
+    }
+    if model:
+        payload["model"] = model
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    async with httpx.AsyncClient(timeout=_LLM_TIMEOUT_GATEWAY) as client:
         resp = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {settings.openai_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": settings.llm_model,
-                "messages": messages,
-                "temperature": 0.7,
-                "response_format": {"type": "json_object"},
-            },
+            f"{settings.llm_gateway_url}/generate",
+            json=payload,
         )
         resp.raise_for_status()
-        data = resp.json()
-        return json.loads(data["choices"][0]["message"]["content"])
-
-
-async def query_ollama(messages: list[dict]) -> dict:
-    """Call local Ollama LLM for reasoning (direct, used as fallback)."""
-    global _ollama_busy
-    _ollama_busy = True
-    try:
-      async with httpx.AsyncClient(timeout=_LLM_TIMEOUT_OLLAMA) as client:
-        resp = await client.post(
-            f"{settings.ollama_url}/api/chat",
-            json={
-                "model": settings.ollama_model,
-                "messages": messages,
-                "stream": False,
-                "options": {"num_predict": 50},
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        # Log Ollama performance metrics
-        _pec = data.get("prompt_eval_count", 0)
-        _ec = data.get("eval_count", 0)
-        _ed = data.get("eval_duration", 0) / 1e9
-        _td = data.get("total_duration", 0) / 1e9
-        _ld = data.get("load_duration", 0) / 1e9
-        _tps = _ec / _ed if _ed > 0 else 0
-        _msg_sizes = [len(m.get("content", "")) for m in messages]
-        logger.info(
-            f"Ollama perf: prompt_tok={_pec} eval_tok={_ec} eval={_ed:.1f}s "
-            f"tok/s={_tps:.1f} total={_td:.1f}s load={_ld:.2f}s msg_chars={_msg_sizes}"
-        )
-        content = data["message"]["content"]
+        content = resp.json()["content"]
         try:
             return json.loads(content)
         except (json.JSONDecodeError, TypeError):
             return {"reply": content.strip(), "memory_updates": [], "actions": []}
-    finally:
-        _ollama_busy = False
 
 
-async def query_gateway(messages: list[dict]) -> dict:
-    """Call LLM Gateway for centralized routing, caching, and fallback."""
-    async with httpx.AsyncClient(timeout=_LLM_TIMEOUT_GATEWAY) as client:
-        resp = await client.post(
-            f"{settings.llm_gateway_url}/generate",
-            json={
-                "messages": messages,
-                "response_format": "json",
-                "caller": "fazle-brain",
-                "temperature": 0.7,
-            },
-        )
-        resp.raise_for_status()
-        return json.loads(resp.json()["content"])
+async def query_llm(messages: list[dict], request_type: str = "user_chat") -> dict:
+    """Route ALL LLM requests through gateway. No direct provider calls."""
+    return await query_gateway(messages, request_type=request_type)
 
 
-async def query_llm(messages: list[dict]) -> dict:
-    """Route to LLM Gateway (preferred) or direct provider (fallback)."""
-    if settings.use_llm_gateway:
-        try:
-            return await query_gateway(messages)
-        except Exception as e:
-            logger.warning(f"LLM Gateway unavailable, falling back to direct: {e}")
-    if settings.llm_provider == "ollama":
-        return await query_ollama(messages)
-    return await query_openai(messages)
-
-
-async def query_llm_voice(messages: list[dict]) -> dict:
-    """Voice-optimized LLM call: direct Ollama (fast), bypass gateway."""
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{settings.ollama_url}/api/chat",
-                json={
-                    "model": settings.voice_ollama_model,
-                    "messages": messages,
-                    "stream": False,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            content = data["message"]["content"]
-            try:
-                return json.loads(content)
-            except (json.JSONDecodeError, TypeError):
-                return {"reply": content.strip(), "memory_updates": [], "actions": []}
-    except Exception as e:
-        logger.warning(f"Voice fast Ollama failed, falling back to gateway: {e}")
-        return await query_llm(messages)
-
-
-async def stream_llm_voice(messages: list[dict]):
-    """Voice-optimized SSE streaming: direct Ollama, yields text chunks."""
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            async with client.stream(
-                "POST",
-                f"{settings.ollama_url}/api/chat",
-                json={
-                    "model": settings.voice_ollama_model,
-                    "messages": messages,
-                    "stream": True,
-                },
-            ) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if line.strip():
-                        data = json.loads(line)
-                        chunk = data.get("message", {}).get("content", "")
-                        done = data.get("done", False)
-                        yield json.dumps({"content": chunk, "done": done}) + "\n"
-                        if done:
-                            break
-    except Exception as e:
-        logger.error(f"Voice stream failed: {e}")
-        yield json.dumps({"content": "", "done": True, "error": str(e)}) + "\n"
-
-
-async def stream_llm_gateway(messages: list[dict]):
-    """Stream from LLM Gateway SSE endpoint, yields text chunks."""
+async def stream_llm_gateway(messages: list[dict], max_tokens: int = None,
+                              caller: str = "fazle-brain-stream", request_type: str = "user_chat"):
+    """Stream from LLM Gateway SSE endpoint, yields text chunks.
+    Handles both OpenAI-style and Ollama-style SSE from the gateway."""
+    payload = {
+        "messages": messages,
+        "caller": caller,
+        "temperature": 0.7,
+        "stream": True,
+        "request_type": request_type,
+    }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             async with client.stream(
                 "POST",
                 f"{settings.llm_gateway_url}/generate",
-                json={
-                    "messages": messages,
-                    "caller": "fazle-brain-stream",
-                    "temperature": 0.7,
-                    "stream": True,
-                },
+                json=payload,
             ) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
@@ -462,9 +347,18 @@ async def stream_llm_gateway(messages: list[dict]):
                             break
                         try:
                             chunk_data = json.loads(chunk_str)
-                            delta = chunk_data.get("choices", [{}])[0].get("delta", {})
-                            text = delta.get("content", "")
-                            yield json.dumps({"content": text, "done": False}) + "\n"
+                            # Handle Ollama-style: {"content": "...", "done": ...}
+                            if "content" in chunk_data and "done" in chunk_data:
+                                yield json.dumps({"content": chunk_data["content"], "done": chunk_data["done"]}) + "\n"
+                                if chunk_data["done"]:
+                                    break
+                            # Handle OpenAI-style: {"choices": [{"delta": {"content": "..."}}]}
+                            elif "choices" in chunk_data:
+                                delta = chunk_data["choices"][0].get("delta", {})
+                                text = delta.get("content", "")
+                                yield json.dumps({"content": text, "done": False}) + "\n"
+                            else:
+                                yield json.dumps({"content": chunk_str, "done": False}) + "\n"
                         except (json.JSONDecodeError, IndexError, KeyError):
                             yield json.dumps({"content": chunk_str, "done": False}) + "\n"
     except Exception as e:
@@ -561,19 +455,17 @@ def _classify_query_complexity(message: str) -> str:
     return "medium"
 
 
-# STEP 4: Cost-aware LLM routing with failover
+# STEP 4: Cost-aware LLM routing via gateway
 import time as _time
 
 
 async def query_llm_smart(messages: list[dict], complexity: str = "medium") -> dict:
-    """FIX 5: Ollama-first LLM routing with parallel fallback.
-    Fires Ollama + Gateway simultaneously. OpenAI only if key configured.
-    Global timeout: 12s. Falls back to fast model, then static Bangla reply."""
+    """Single gateway LLM call. Gateway handles provider routing and fallback internally.
+    Complexity affects model selection passed to gateway."""
     model_override = None
     route_label = "full"
 
     if complexity == "simple":
-        model_override = None  # FIX 5: Use Ollama default model, not gpt-4o-mini
         route_label = "fast"
     elif complexity == "complex":
         model_override = settings.llm_model
@@ -581,185 +473,24 @@ async def query_llm_smart(messages: list[dict], complexity: str = "medium") -> d
 
     t0 = _time.monotonic()
 
-    # FIX 5: Ollama is priority 0 (preferred), gateway secondary, OpenAI last
-    _PRIORITY = {"ollama": 0, "gateway": 1, "openai_direct": 2}
-
-    # ── Build provider coroutines ──
-    async def _provider_gateway():
-        return await _query_gateway_with_model(messages, model_override)
-
-    async def _provider_openai():
-        return await _query_openai_with_model(messages, model_override)
-
-    async def _provider_ollama():
-        return await query_ollama(messages)
-
-    # FIX 5: Ollama first, then gateway, then OpenAI
-    providers: list[tuple[str, asyncio.Task]] = []
-    providers.append(("ollama", asyncio.create_task(_provider_ollama())))
-    if settings.use_llm_gateway:
-        providers.append(("gateway", asyncio.create_task(_provider_gateway())))
-    # OpenAI disabled — API key is 429-blocked, wastes ~1s per request
-    # if settings.openai_api_key:
-    #     providers.append(("openai_direct", asyncio.create_task(_provider_openai())))
-
-    task_to_name: dict[asyncio.Task, str] = {t: n for n, t in providers}
-    pending = {t for _, t in providers}
-    failed_providers: list[str] = []
-    result = None
-    winner = None
-
     try:
-        remaining = _LLM_PARALLEL_GLOBAL
-        while pending and result is None:
-            done, pending = await asyncio.wait(
-                pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
-            )
-            elapsed_now = _time.monotonic() - t0
-            remaining = max(0, _LLM_PARALLEL_GLOBAL - elapsed_now)
-
-            # ── Evaluate completed tasks, pick best by priority ──
-            candidates: list[tuple[int, str, dict]] = []
-            for task in done:
-                name = task_to_name[task]
-                if task.exception() is not None:
-                    ex = task.exception()
-                    logger.warning(f"LLM parallel: {name}_fail in {elapsed_now:.2f}s err={ex}")
-                    failed_providers.append(name)
-                else:
-                    candidates.append((_PRIORITY.get(name, 99), name, task.result()))
-
-            if candidates:
-                candidates.sort(key=lambda c: c[0])  # best priority first
-                _, winner, result = candidates[0]
-
-            # ── Fast fail: if all done and none succeeded, stop early ──
-            if not pending and result is None:
-                break
-
-            if remaining <= 0:
-                break
-    except Exception as e:
-        logger.error(f"LLM parallel orchestration error: {e}")
-    finally:
-        # ── Cancel all remaining tasks ──
-        cancelled_names = []
-        for task in pending:
-            task.cancel()
-            cancelled_names.append(task_to_name[task])
-        # Also cancel any non-winner from done set
-        for _, t in providers:
-            if not t.done():
-                t.cancel()
-
-    elapsed = _time.monotonic() - t0
-
-    if result is not None:
-        intel_usage_track(model_override or settings.llm_model, route=f"{route_label}_{winner}")
-        logger.info(
-            f"LLM OK via {winner} in {elapsed:.2f}s | "
-            f"cancelled={cancelled_names} failed={failed_providers} route={route_label}"
-        )
+        result = await query_gateway(messages, model=model_override)
+        elapsed = _time.monotonic() - t0
+        intel_usage_track(model_override or settings.llm_model, route=f"{route_label}_gateway")
+        logger.info(f"LLM OK via gateway in {elapsed:.2f}s route={route_label}")
         return result
-
-    # ── All parallel providers failed — try fast model if Ollama wasn't already tried ──
-    deadline_left = _LLM_PARALLEL_GLOBAL - (_time.monotonic() - t0)
-    if "ollama" in failed_providers:
-        # Ollama backend is down — fast_model (same backend) would also fail
-        logger.warning(
-            f"LLM parallel ALL FAILED in {elapsed:.2f}s failed={failed_providers} — "
-            f"skipping fast_model (ollama already failed)"
-        )
-    elif deadline_left > 0.5:
-        logger.warning(
-            f"LLM parallel ALL FAILED in {elapsed:.2f}s failed={failed_providers} — trying fast_model"
-        )
-        try:
-            result = await asyncio.wait_for(
-                _query_fast_model_fallback(messages), timeout=min(deadline_left, _LLM_TIMEOUT_FAST)
-            )
-            elapsed = _time.monotonic() - t0
-            intel_usage_track(settings.voice_fast_model, route="emergency_fast")
-            logger.info(f"LLM OK via fast_model in {elapsed:.2f}s after parallel failure")
-            return result
-        except Exception as e:
-            failed_providers.append("fast_model")
-            elapsed = _time.monotonic() - t0
-            logger.error(f"LLM fast_model also failed in {elapsed:.2f}s err={e}")
-    else:
-        logger.warning(
-            f"LLM parallel ALL FAILED in {elapsed:.2f}s — no time left for fast_model"
-        )
+    except Exception as e:
+        elapsed = _time.monotonic() - t0
+        logger.error(f"LLM gateway failed in {elapsed:.2f}s: {e}")
 
     # ── Static fallback — return empty so /chat endpoint detects failure ──
     intel_usage_track("static_fallback", route="emergency_static")
-    logger.error(f"LLM ALL PROVIDERS FAILED — returning empty reply for fallback. chain={failed_providers}")
+    logger.error("LLM gateway failed — returning empty reply for fallback")
     return {
         "reply": "",
         "memory_updates": [],
         "actions": [],
     }
-
-
-async def _query_gateway_with_model(messages: list[dict], model: str = None) -> dict:
-    """Call LLM Gateway with optional model override."""
-    payload = {
-        "messages": messages,
-        "caller": "fazle-brain",
-        "temperature": 0.7,
-    }
-    if model:
-        payload["model"] = model
-    async with httpx.AsyncClient(timeout=_LLM_TIMEOUT_GATEWAY) as client:
-        resp = await client.post(f"{settings.llm_gateway_url}/generate", json=payload)
-        resp.raise_for_status()
-        content = resp.json()["content"]
-        try:
-            return json.loads(content)
-        except (json.JSONDecodeError, TypeError):
-            return {"reply": content.strip(), "memory_updates": [], "actions": []}
-
-
-async def _query_openai_with_model(messages: list[dict], model: str = None) -> dict:
-    """Direct OpenAI call with optional model override. 8s hard timeout."""
-    use_model = model or settings.llm_model
-    async with httpx.AsyncClient(timeout=_LLM_TIMEOUT_OPENAI) as client:
-        resp = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {settings.openai_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": use_model,
-                "messages": messages,
-                "temperature": 0.7,
-                "response_format": {"type": "json_object"},
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return json.loads(data["choices"][0]["message"]["content"])
-
-
-async def _query_fast_model_fallback(messages: list[dict]) -> dict:
-    """Emergency fallback: use the tiny fast model (qwen2.5:0.5b) via Ollama."""
-    async with httpx.AsyncClient(timeout=_LLM_TIMEOUT_FAST) as client:
-        resp = await client.post(
-            f"{settings.ollama_url}/api/chat",
-            json={
-                "model": settings.voice_fast_model,
-                "messages": messages,
-                "stream": False,
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        content = data["message"]["content"]
-        try:
-            return json.loads(content)
-        except (json.JSONDecodeError, TypeError):
-            return {"reply": content.strip(), "memory_updates": [], "actions": []}
 
 
 # STEP 1: Question Strategy — confidence-aware response
@@ -796,39 +527,14 @@ FAST_VOICE_PROMPT = (
 )
 
 
-async def stream_ollama_fast(prompt: str):
-    """Ultra-fast Ollama streaming via /api/generate — skips chat overhead."""
-    try:
-        client = _get_fast_client()
-        async with client.stream(
-            "POST",
-            "/api/generate",
-            json={
-                "model": settings.voice_fast_model,
-                "prompt": prompt,
-                "system": FAST_VOICE_PROMPT,
-                "stream": True,
-                "options": {"num_ctx": 512, "num_predict": 40},
-            },
-        ) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if line.strip():
-                    data = json.loads(line)
-                    chunk = data.get("response", "")
-                    done = data.get("done", False)
-                    yield json.dumps({"content": chunk, "done": done}) + "\n"
-                    if done:
-                        break
-    except Exception as e:
-        logger.error(f"Fast Ollama stream failed, falling back to gateway: {e}")
-        # Fallback: use gateway with minimal messages
-        messages = [
-            {"role": "system", "content": FAST_VOICE_PROMPT},
-            {"role": "user", "content": prompt},
-        ]
-        async for chunk in stream_llm_gateway(messages):
-            yield chunk
+async def stream_fast_via_gateway(prompt: str):
+    """Fast voice streaming via LLM Gateway — uses gateway's model/routing."""
+    messages = [
+        {"role": "system", "content": FAST_VOICE_PROMPT},
+        {"role": "user", "content": prompt},
+    ]
+    async for chunk in stream_llm_gateway(messages, max_tokens=40, caller="fazle-brain-fast"):
+        yield chunk
 
 
 async def retrieve_memories(query: str, memory_type: Optional[str] = None, user_id: Optional[str] = None, limit: int = 5) -> list[dict]:
@@ -999,7 +705,7 @@ async def decide(request: DecisionRequest):
     ]
 
     try:
-        result = await query_llm(messages)
+        result = await query_llm(messages, request_type="system")
     except Exception as e:
         logger.error(f"LLM error: {e}")
         raise HTTPException(status_code=502, detail="LLM service unavailable")
@@ -1117,37 +823,21 @@ async def chat_voice(request: VoiceChatRequest):
         {"role": "user", "content": request.message},
     ]
 
-    # Use voice-optimized LLM path (direct Ollama for speed)
+    # Voice LLM path — all calls through gateway
     try:
-        if settings.voice_fast_mode or not settings.use_llm_gateway:
-            # Direct Ollama — fastest path
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
-                    f"{settings.ollama_url}/api/chat",
-                    json={
-                        "model": settings.voice_ollama_model,
-                        "messages": messages,
-                        "stream": False,
-                        "options": {"num_ctx": 1024, "num_predict": 60},
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                reply = data["message"]["content"].strip()
-        else:
-            # Gateway path — with fallback
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
-                    f"{settings.llm_gateway_url}/generate",
-                    json={
-                        "messages": messages,
-                        "caller": "fazle-brain-voice",
-                        "temperature": 0.7,
-                        "max_tokens": 80,
-                    },
-                )
-                resp.raise_for_status()
-                reply = resp.json().get("content", "").strip()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{settings.llm_gateway_url}/generate",
+                json={
+                    "messages": messages,
+                    "caller": "fazle-brain-voice",
+                    "temperature": 0.7,
+                    "max_tokens": 80,
+                    "request_type": "user_chat",
+                },
+            )
+            resp.raise_for_status()
+            reply = resp.json().get("content", "").strip()
     except Exception as e:
         logger.error(f"Voice LLM failed: {e}")
         reply = "দুঃখিত, একটু সমস্যা হচ্ছে। আবার বলবেন?"
@@ -1209,6 +899,7 @@ async def _governor_score_response(message: str, reply: str, relationship: str, 
                     ],
                     "temperature": 0.1,
                     "caller": "fazle-governor",
+                    "request_type": "system",
                 },
             )
             resp.raise_for_status()
@@ -1431,19 +1122,29 @@ async def chat(request: ChatRequest):
     # ── Owner style learning (STEP 6) — skipped, always truncated ──
     owner_style_context = ""
 
-    # ── Knowledge Base context injection ──
+    # ── Knowledge Base context injection (Phase 7: Smart Retrieval) ──
     knowledge_context = ""
     try:
-        knowledge_context = await build_knowledge_context(
+        knowledge_context = await build_smart_context(
             message=request.message,
             caller_id=user_id or user_identifier,
             caller_role=relationship,
+            memory_url=settings.memory_url,
             api_url=f"http://fazle-api:8100",
         )
         if knowledge_context:
-            logger.info(f"Knowledge context injected: {len(knowledge_context)} chars, intents={detect_intents(request.message)}")
+            logger.info(f"Smart knowledge context injected: {len(knowledge_context)} chars")
     except Exception as _kb_err:
-        logger.debug(f"Knowledge context fetch skipped: {_kb_err}")
+        logger.debug(f"Smart knowledge context failed, trying legacy: {_kb_err}")
+        try:
+            knowledge_context = await build_knowledge_context(
+                message=request.message,
+                caller_id=user_id or user_identifier,
+                caller_role=relationship,
+                api_url=f"http://fazle-api:8100",
+            )
+        except Exception:
+            pass
 
     # Inject context — knowledge_context goes FIRST (highest priority for truncation survival)
     # Then other optional contexts follow
@@ -1786,20 +1487,38 @@ async def chat_owner(request: OwnerChatRequest):
         {"role": "user", "content": message},
     ]
 
-    # 5. Call LLM (owner is trusted — skip safety checks)
-    try:
-        result = await query_llm(messages)
-    except Exception as e:
-        logger.error(f"Owner chat LLM error: {e}")
-        return {"reply": "দুঃখিত, একটু সমস্যা হচ্ছে। আবার চেষ্টা করুন।", "intent": None, "action_taken": False}
+    # 4a. Phase 9: Rule-based intent pre-detection (skip LLM for known actions)
+    rule_detected = detect_action_rule(message)
+    if rule_detected:
+        rule_intent, rule_params = rule_detected
+        logger.info(f"Rule-detected action '{rule_intent}' — skipping LLM intent detection")
+        # Still call LLM for a natural reply, but force the intent + params
+        try:
+            result = await query_llm(messages, request_type="user_chat")
+        except Exception:
+            result = {}
+        reply = result.get("reply", "")
+        intent = rule_intent
+        action = {"execute": True, "params": rule_params, "description": f"Rule-detected: {rule_intent}"}
+        needs_confirmation = action_needs_confirmation(rule_intent)
+        needs_password = False
+        detected_tone = result.get("detected_tone")
+        memory_updates = result.get("memory_updates", [])
+    else:
+        # 5. Call LLM (owner is trusted — skip safety checks)
+        try:
+            result = await query_llm(messages, request_type="user_chat")
+        except Exception as e:
+            logger.error(f"Owner chat LLM error: {e}")
+            return {"reply": "দুঃখিত, একটু সমস্যা হচ্ছে। আবার চেষ্টা করুন।", "intent": None, "action_taken": False}
 
-    reply = result.get("reply", "বুঝতে পারলাম না, আবার বলুন?")
-    intent = result.get("intent")
-    action = result.get("action")
-    needs_confirmation = result.get("needs_confirmation", False)
-    needs_password = result.get("needs_password", False)
-    detected_tone = result.get("detected_tone")
-    memory_updates = result.get("memory_updates", [])
+        reply = result.get("reply", "বুঝতে পারলাম না, আবার বলুন?")
+        intent = result.get("intent")
+        action = result.get("action")
+        needs_confirmation = result.get("needs_confirmation", False)
+        needs_password = result.get("needs_password", False)
+        detected_tone = result.get("detected_tone")
+        memory_updates = result.get("memory_updates", [])
 
     action_taken = False
 
@@ -1824,7 +1543,13 @@ async def chat_owner(request: OwnerChatRequest):
             else:
                 action_taken = await _execute_owner_action(pending, request.platform)
                 owner_pending_action_clear()
-                if not reply or reply == pending.get("description", ""):
+                # Phase 8: use handler message for registered actions
+                if _LAST_ACTION_RESULT and _LAST_ACTION_RESULT.get("message"):
+                    if action_taken:
+                        reply = f"✅ {_LAST_ACTION_RESULT['message']}"
+                    else:
+                        reply = f"❌ {_LAST_ACTION_RESULT['message']}"
+                elif not reply or reply == pending.get("description", ""):
                     reply = "✅ হয়ে গেছে!"
         else:
             owner_pending_action_clear()
@@ -1850,6 +1575,17 @@ async def chat_owner(request: OwnerChatRequest):
                 "original_message": message,
             })
             reply = reply or "⚠️ এটা critical action। আপনি কি নিশ্চিত?"
+        # Phase 8: registered actions that need confirmation must not skip it
+        elif action_needs_confirmation(intent):
+            needs_confirmation = True
+            owner_pending_action_set({
+                "intent": intent,
+                "description": action.get("description", reply),
+                "params": action.get("params", {}),
+                "original_message": message,
+            })
+            adef = get_action_def(intent)
+            reply = reply or f"⚠️ {adef.description if adef else intent} — আপনি কি নিশ্চিত?"
         else:
             execute_flag = action.get("execute", True)
             if execute_flag:
@@ -1902,10 +1638,111 @@ async def chat_owner(request: OwnerChatRequest):
     }
 
 
+# ── Owner Action Audit ──────────────────────────────────────
+
+_ACTION_AUDIT_DSN: str | None = None
+
+
+def _ensure_action_audit_table(dsn: str) -> None:
+    """Create the owner_action_audit table if it doesn't exist."""
+    global _ACTION_AUDIT_DSN
+    _ACTION_AUDIT_DSN = dsn
+    try:
+        import psycopg2
+        with psycopg2.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS owner_action_audit (
+                        id SERIAL PRIMARY KEY,
+                        timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        phone VARCHAR(50),
+                        action_type VARCHAR(100) NOT NULL,
+                        parameters JSONB DEFAULT '{}',
+                        status VARCHAR(20) NOT NULL DEFAULT 'success',
+                        error_message TEXT
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_action_audit_ts
+                        ON owner_action_audit(timestamp DESC);
+                    CREATE INDEX IF NOT EXISTS idx_action_audit_type
+                        ON owner_action_audit(action_type);
+                """)
+                # Phase 8: extend with result_data and execution_time_ms
+                cur.execute("""
+                    ALTER TABLE owner_action_audit
+                        ADD COLUMN IF NOT EXISTS result_data JSONB DEFAULT '{}';
+                    ALTER TABLE owner_action_audit
+                        ADD COLUMN IF NOT EXISTS execution_time_ms INTEGER DEFAULT 0;
+                    ALTER TABLE owner_action_audit
+                        ADD COLUMN IF NOT EXISTS rolled_back BOOLEAN DEFAULT FALSE;
+                """)
+            conn.commit()
+        logger.info("owner_action_audit table ensured (with Phase 8 columns)")
+    except Exception as e:
+        logger.warning(f"owner_action_audit table creation failed (non-fatal): {e}")
+
+
+def _log_owner_action_audit(
+    action_type: str,
+    parameters: dict,
+    status: str = "success",
+    error_message: str | None = None,
+    phone: str | None = None,
+    result_data: dict | None = None,
+    execution_time_ms: int | None = None,
+) -> None:
+    """Insert a row into owner_action_audit. Fire-and-forget, never raises."""
+    if not _ACTION_AUDIT_DSN:
+        return
+    try:
+        import psycopg2
+        with psycopg2.connect(_ACTION_AUDIT_DSN) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO owner_action_audit
+                       (phone, action_type, parameters, status, error_message,
+                        result_data, execution_time_ms)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    (
+                        phone,
+                        action_type,
+                        json.dumps(parameters),
+                        status,
+                        error_message,
+                        json.dumps(result_data) if result_data else '{}',
+                        int(execution_time_ms) if execution_time_ms else 0,
+                    ),
+                )
+            conn.commit()
+    except Exception as e:
+        logger.debug(f"Audit log insert failed: {e}")
+
+
+# Phase 8: last action result for richer replies
+_LAST_ACTION_RESULT: dict = {}
+
+
 async def _execute_owner_action(action_data: dict, platform: str) -> bool:
     """Execute a confirmed owner action. Returns True if successful."""
+    global _LAST_ACTION_RESULT
+    _LAST_ACTION_RESULT = {}
+
     intent = action_data.get("intent", "")
     params = action_data.get("params", {})
+
+    # ── Phase 8: delegate to Action Registry if registered ──
+    if is_registered_action(intent):
+        result = execute_registered_action(intent, params, _ACTION_AUDIT_DSN)
+        _LAST_ACTION_RESULT = result
+        _log_owner_action_audit(
+            action_type=intent,
+            parameters=params,
+            status="success" if result["success"] else "error",
+            error_message=result["message"] if not result["success"] else None,
+            result_data=result.get("result_data"),
+            execution_time_ms=result.get("execution_time_ms"),
+        )
+        logger.info(f"Registered action '{intent}' result: {result['message']}")
+        return result["success"]
 
     try:
         if intent == "set_relation":
@@ -2139,10 +1976,12 @@ async def _execute_owner_action(action_data: dict, platform: str) -> bool:
             return True  # LLM fetches via system agent
 
         logger.info(f"Owner action executed: {intent}")
+        _log_owner_action_audit(action_type=intent, parameters=params, status="success")
         return True
 
     except Exception as e:
         logger.error(f"Owner action execution failed ({intent}): {e}")
+        _log_owner_action_audit(action_type=intent, parameters=params, status="error", error_message=str(e)[:500])
         return False
 
 
@@ -2228,7 +2067,7 @@ async def owner_daily_report():
     ]
 
     try:
-        result = await query_llm(messages)
+        result = await query_llm(messages, request_type="system")
         report = result.get("reply", "আজকের রিপোর্ট তৈরি করা যায়নি।")
     except Exception:
         report = "রিপোর্ট তৈরিতে সমস্যা হয়েছে।"
@@ -2280,7 +2119,7 @@ Guidelines:
     ]
 
     try:
-        result = await query_llm(messages)
+        result = await query_llm(messages, request_type="system")
         followup_msg = result.get("reply", "")
     except Exception:
         followup_msg = "আশা করি আপনি ভালো আছেন! কোনো সাহায্য লাগলে জানাবেন।"
@@ -2360,11 +2199,8 @@ async def chat_stream(request: StreamChatRequest):
         {"role": "user", "content": request.message},
     ]
 
-    # Choose streaming source
-    if settings.voice_fast_mode:
-        stream_gen = stream_llm_voice(messages)
-    else:
-        stream_gen = stream_llm_gateway(messages)
+    # All streaming goes through gateway
+    stream_gen = stream_llm_gateway(messages)
 
     async def event_stream():
         full_reply = []
@@ -2413,12 +2249,10 @@ class FastChatRequest(BaseModel):
 
 @app.post("/chat/fast")
 async def chat_fast(request: FastChatRequest):
-    """Ultra-fast streaming: zero preprocessing, direct Ollama /api/generate.
-    Skips persona, memory, moderation, conversation history.
-    Target: <500ms TTFB on CPU with qwen2.5:0.5b."""
+    """Fast streaming via LLM Gateway. Skips persona, memory, moderation, conversation history."""
 
     async def event_stream():
-        async for chunk in stream_ollama_fast(request.message):
+        async for chunk in stream_fast_via_gateway(request.message):
             yield f"data: {chunk}\n\n"
 
     return StreamingResponse(
@@ -2529,7 +2363,7 @@ async def chat_agent(request: AgentChatRequest):
     ]
 
     try:
-        result = await query_llm(messages)
+        result = await query_llm(messages, request_type="user_chat")
     except Exception as e:
         logger.error(f"Agent LLM error: {e}")
         raise HTTPException(status_code=502, detail="LLM service unavailable")
@@ -2594,7 +2428,7 @@ async def summarize_conversation(request: SummarizeRequest):
     ]
 
     try:
-        result = await query_llm(messages)
+        result = await query_llm(messages, request_type="system")
         summary = result.get("reply", "")
         if not summary:
             return {"summary": "", "status": "generation_failed"}
@@ -2661,7 +2495,7 @@ async def explain_topic(request: ExplainRequest):
     ]
 
     try:
-        result = await query_llm(messages)
+        result = await query_llm(messages, request_type="user_chat")
         explanation = result.get("reply", "")
     except Exception as e:
         logger.warning(f"Explanation generation failed: {e}")
@@ -3066,10 +2900,67 @@ def _field_to_category(field: str) -> str:
     return _FIELD_CATEGORY_MAP.get(field, "personal")
 
 
+# ── Owner profile extraction pre-filter & rate limit ────────
+
+_PROFILE_SKIP_MESSAGES = {"ok", "thanks", "hmm", "👍", "done"}
+_PROFILE_KEYWORDS_BN = ["আমার", "আমাদের", "কোম্পানি", "ঠিকানা"]
+_PROFILE_KEYWORDS_EN = ["my", "company", "we provide", "address"]
+_PROFILE_RATE_LIMIT_KEY = "fazle:owner_profile_last_run"
+_PROFILE_RATE_LIMIT_SECONDS = 30
+
+
+def should_extract_owner_profile(message: str) -> tuple[bool, str]:
+    """Pre-filter: decide if message warrants an LLM profile extraction call.
+
+    Returns (should_run, reason).
+    """
+    stripped = message.strip()
+
+    # Skip very short / trivial messages
+    if len(stripped) < 15:
+        return False, f"too_short ({len(stripped)} chars)"
+    if stripped.lower() in _PROFILE_SKIP_MESSAGES:
+        return False, f"trivial_message ({stripped})"
+
+    # Keyword scan (Bangla + English)
+    lower = stripped.lower()
+    has_keyword = any(kw in lower for kw in _PROFILE_KEYWORDS_EN) or any(kw in stripped for kw in _PROFILE_KEYWORDS_BN)
+    if not has_keyword:
+        return False, "no_profile_keywords"
+
+    # Rate limit via Redis
+    try:
+        r = _get_redis()
+        last_run = r.get(_PROFILE_RATE_LIMIT_KEY)
+        if last_run:
+            elapsed = (datetime.utcnow() - datetime.fromisoformat(last_run)).total_seconds()
+            if elapsed < _PROFILE_RATE_LIMIT_SECONDS:
+                return False, f"rate_limited ({elapsed:.0f}s < {_PROFILE_RATE_LIMIT_SECONDS}s)"
+    except Exception:
+        pass  # Redis down — allow extraction
+
+    return True, "keywords_matched"
+
+
 async def _extract_owner_profile_from_message(message: str, reply: str) -> None:
     """Analyze owner messages for identity information and auto-store in profile.
     Uses LLM to detect if the message contains personal info about Azim."""
+    # Pre-filter: skip messages unlikely to contain profile info
+    should_run, reason = should_extract_owner_profile(message)
+    if not should_run:
+        logger.debug(f"Profile extraction SKIPPED: {reason}")
+        return
+
+    logger.info(f"Profile extraction TRIGGERED: {reason}")
+
     try:
+        # Mark rate limit timestamp BEFORE the LLM call
+        try:
+            r = _get_redis()
+            r.set(_PROFILE_RATE_LIMIT_KEY, datetime.utcnow().isoformat(), ex=_PROFILE_RATE_LIMIT_SECONDS * 2)
+        except Exception:
+            pass
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{settings.llm_gateway_url}/generate",
@@ -3091,6 +2982,7 @@ async def _extract_owner_profile_from_message(message: str, reply: str) -> None:
                     "response_format": "json",
                     "caller": "fazle-brain-profile-extract",
                     "temperature": 0.1,
+                    "request_type": "owner_analysis",
                 },
             )
             resp.raise_for_status()
@@ -3112,7 +3004,25 @@ async def _extract_owner_profile_from_message(message: str, reply: str) -> None:
                         logger.info(f"Governor blocked profile update for field: {field}")
                 for field, value in validated_fields.items():
                     azim_profile_set(field, str(value))
+                # Persist to PostgreSQL via /knowledge/store
                 if validated_fields:
+                    try:
+                        async with httpx.AsyncClient(timeout=10.0) as pg_client:
+                            for field, value in validated_fields.items():
+                                category = _field_to_category(field)
+                                await pg_client.post(
+                                    f"{settings.memory_url}/knowledge/store",
+                                    json={
+                                        "category": category,
+                                        "subcategory": field,
+                                        "key": field,
+                                        "value": str(value),
+                                        "language": "auto",
+                                        "source": "profile_extraction",
+                                    },
+                                )
+                    except Exception as e:
+                        logger.warning(f"Profile PostgreSQL backup failed: {e}")
                     logger.info(f"Auto-extracted owner profile fields: {list(validated_fields.keys())}")
     except Exception as e:
         logger.debug(f"Profile extraction skipped: {e}")
@@ -3495,10 +3405,8 @@ async def chat_agent_stream(request: AgentChatRequest):
         {"role": "user", "content": request.message},
     ]
 
-    if settings.voice_fast_mode:
-        stream_gen = stream_llm_voice(messages)
-    else:
-        stream_gen = stream_llm_gateway(messages)
+    # All streaming goes through gateway
+    stream_gen = stream_llm_gateway(messages)
 
     async def event_stream():
         full_reply = []
@@ -3522,6 +3430,268 @@ async def chat_agent_stream(request: AgentChatRequest):
 
 
 # ── System Status endpoint ─────────────────────────────────
+
+# ── Phase 8: Action Metrics endpoint ──────────────────────
+@app.get("/analytics/action-metrics")
+async def analytics_action_metrics():
+    """Return per-action execution metrics (count, success rate, avg latency)."""
+    return {
+        "actions": get_action_metrics(),
+        "registry": {
+            name: {
+                "risk": adef.risk,
+                "needs_confirmation": adef.needs_confirmation,
+                "required_fields": adef.required_fields,
+                "description": adef.description,
+            }
+            for name, adef in ACTION_REGISTRY.items()
+        },
+    }
+
+
+# ── Phase 9: Rollback endpoint ────────────────────────────
+class RollbackRequest(BaseModel):
+    action_id: int
+    user_role: str = "owner"
+
+
+@app.post("/actions/rollback")
+async def api_rollback_action(req: RollbackRequest):
+    """Rollback a previously executed action by audit ID."""
+    if not can_rollback(req.user_role):
+        raise HTTPException(status_code=403, detail="Only owner can rollback actions.")
+    if not _ACTION_AUDIT_DSN:
+        raise HTTPException(status_code=503, detail="Database not configured.")
+    result = rollback_action(req.action_id, _ACTION_AUDIT_DSN)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+    return result
+
+
+# ── Phase 9: Workflow endpoint ────────────────────────────
+class WorkflowRequest(BaseModel):
+    workflow: str
+    params: dict = {}
+    user_role: str = "owner"
+
+
+@app.post("/actions/workflow")
+async def api_execute_workflow(req: WorkflowRequest):
+    """Execute a multi-step workflow by name."""
+    if not _ACTION_AUDIT_DSN:
+        raise HTTPException(status_code=503, detail="Database not configured.")
+    steps = WORKFLOW_REGISTRY.get(req.workflow)
+    if not steps:
+        raise HTTPException(status_code=404, detail=f"Unknown workflow: {req.workflow}")
+    for step in steps:
+        if not can_execute(req.user_role, step):
+            raise HTTPException(status_code=403, detail=f"Role '{req.user_role}' cannot execute '{step}'.")
+    result = execute_workflow(req.workflow, req.params, _ACTION_AUDIT_DSN)
+    return result
+
+
+# ── Phase 9: Dashboard UI ─────────────────────────────────
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard_ui():
+    """Serve admin dashboard HTML."""
+    import pathlib
+    html_path = pathlib.Path(__file__).parent / "dashboard.html"
+    if html_path.exists():
+        return HTMLResponse(html_path.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>Dashboard not found</h1>", status_code=404)
+
+
+# ── Phase 9: Dashboard API ────────────────────────────────
+@app.get("/dashboard/overview")
+async def dashboard_overview():
+    """System overview for admin dashboard."""
+    metrics = get_action_metrics()
+    total_actions = sum(m.get("total", 0) for m in metrics.values())
+    total_success = sum(m.get("success", 0) for m in metrics.values())
+    total_fail = sum(m.get("fail", 0) for m in metrics.values())
+    return {
+        "total_actions": total_actions,
+        "total_success": total_success,
+        "total_fail": total_fail,
+        "success_rate": round(total_success / total_actions * 100, 1) if total_actions else 0,
+        "registered_actions": len(ACTION_REGISTRY),
+        "workflows": list(WORKFLOW_REGISTRY.keys()),
+    }
+
+
+@app.get("/dashboard/actions")
+async def dashboard_actions(limit: int = 20):
+    """Recent actions from audit log."""
+    if not _ACTION_AUDIT_DSN:
+        return {"actions": [], "error": "Database not configured."}
+    try:
+        import psycopg2
+        with psycopg2.connect(_ACTION_AUDIT_DSN) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id, timestamp, action_type, parameters, status,
+                              error_message, result_data, execution_time_ms,
+                              COALESCE(rolled_back, FALSE) as rolled_back
+                       FROM owner_action_audit
+                       ORDER BY id DESC LIMIT %s""",
+                    (min(limit, 100),),
+                )
+                rows = cur.fetchall()
+        actions = []
+        for r in rows:
+            rd = r[6]
+            if isinstance(rd, str):
+                try:
+                    rd = json.loads(rd)
+                except (json.JSONDecodeError, TypeError):
+                    rd = {}
+            actions.append({
+                "id": r[0],
+                "timestamp": r[1].isoformat() if r[1] else None,
+                "action_type": r[2],
+                "parameters": r[3] if isinstance(r[3], dict) else {},
+                "status": r[4],
+                "error_message": r[5],
+                "result_data": rd if isinstance(rd, dict) else {},
+                "execution_time_ms": r[7],
+                "rolled_back": r[8],
+            })
+        return {"actions": actions}
+    except Exception as e:
+        logger.warning(f"Dashboard actions query failed: {e}")
+        return {"actions": [], "error": str(e)}
+
+
+@app.get("/dashboard/knowledge")
+async def dashboard_knowledge(limit: int = 30):
+    """Active knowledge facts for dashboard."""
+    if not _ACTION_AUDIT_DSN:
+        return {"facts": [], "error": "Database not configured."}
+    try:
+        import psycopg2
+        with psycopg2.connect(_ACTION_AUDIT_DSN) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id, category, key, value, source, fact_id, version,
+                              confidence, created_at, updated_at
+                       FROM fazle_owner_knowledge
+                       WHERE is_active = TRUE
+                       ORDER BY updated_at DESC LIMIT %s""",
+                    (min(limit, 100),),
+                )
+                rows = cur.fetchall()
+        facts = []
+        for r in rows:
+            facts.append({
+                "id": r[0], "category": r[1], "key": r[2], "value": r[3],
+                "source": r[4], "fact_id": r[5], "version": r[6],
+                "confidence": float(r[7]) if r[7] else None,
+                "created_at": r[8].isoformat() if r[8] else None,
+                "updated_at": r[9].isoformat() if r[9] else None,
+            })
+        return {"facts": facts, "total": len(facts)}
+    except Exception as e:
+        logger.warning(f"Dashboard knowledge query failed: {e}")
+        return {"facts": [], "error": str(e)}
+
+
+@app.get("/dashboard/llm-usage")
+async def dashboard_llm_usage(limit: int = 20):
+    """Recent LLM usage for dashboard."""
+    if not _ACTION_AUDIT_DSN:
+        return {"usage": [], "error": "Database not configured."}
+    try:
+        import psycopg2
+        with psycopg2.connect(_ACTION_AUDIT_DSN) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id, ts, provider, model, is_fallback, latency_ms,
+                              request_type, caller, LEFT(reply, 120) as reply_preview
+                       FROM llm_conversation_log
+                       ORDER BY id DESC LIMIT %s""",
+                    (min(limit, 100),),
+                )
+                rows = cur.fetchall()
+        usage = []
+        for r in rows:
+            usage.append({
+                "id": r[0],
+                "timestamp": r[1].isoformat() if r[1] else None,
+                "provider": r[2], "model": r[3],
+                "is_fallback": r[4], "latency_ms": r[5],
+                "request_type": r[6], "caller": r[7],
+                "reply_preview": r[8],
+            })
+        return {"usage": usage}
+    except Exception as e:
+        logger.warning(f"Dashboard LLM usage query failed: {e}")
+        return {"usage": [], "error": str(e)}
+
+
+# ── Phase 10: Autonomous Intelligence API ───────────────────
+
+class RecommendationApproval(BaseModel):
+    execute: bool = True
+
+
+@app.get("/recommendations")
+async def list_recommendations(limit: int = 30, status: str | None = None):
+    """List recommendations, optionally filtered by status."""
+    if not _ACTION_AUDIT_DSN:
+        return {"recommendations": [], "error": "DB not initialized"}
+    recs = get_all_recommendations(_ACTION_AUDIT_DSN, limit=limit, status_filter=status)
+    stats = get_recommendation_stats(_ACTION_AUDIT_DSN)
+    return {"recommendations": recs, "stats": stats}
+
+
+@app.post("/recommendations/{rec_id}/approve")
+async def api_approve_recommendation(rec_id: int, body: RecommendationApproval = RecommendationApproval()):
+    """Approve a recommendation. Optionally execute the suggested action."""
+    if not _ACTION_AUDIT_DSN:
+        raise HTTPException(status_code=503, detail="DB not initialized")
+    result = approve_recommendation(rec_id, _ACTION_AUDIT_DSN, execute_now=body.execute)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+    return result
+
+
+@app.post("/recommendations/{rec_id}/dismiss")
+async def api_dismiss_recommendation(rec_id: int):
+    """Dismiss a recommendation without executing."""
+    if not _ACTION_AUDIT_DSN:
+        raise HTTPException(status_code=503, detail="DB not initialized")
+    result = dismiss_recommendation(rec_id, _ACTION_AUDIT_DSN)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+    return result
+
+
+@app.post("/recommendations/scan")
+async def trigger_intelligence_scan():
+    """Manually trigger an intelligence scan cycle."""
+    if not _ACTION_AUDIT_DSN:
+        raise HTTPException(status_code=503, detail="DB not initialized")
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, periodic_intelligence_scan, _ACTION_AUDIT_DSN)
+    return result
+
+
+@app.get("/recommendations/stats")
+async def recommendation_statistics():
+    """Get recommendation statistics."""
+    if not _ACTION_AUDIT_DSN:
+        return {"stats": {}}
+    return {"stats": get_recommendation_stats(_ACTION_AUDIT_DSN)}
+
+
+@app.get("/recommendations/learning")
+async def recommendation_learning_stats():
+    """Get self-learning intelligence statistics (Phase 11)."""
+    if not _ACTION_AUDIT_DSN:
+        return {"learning": {}}
+    return {"learning": get_learning_stats(_ACTION_AUDIT_DSN)}
+
+
 @app.get("/status")
 async def system_status():
     """Return comprehensive system status including multi-agent architecture info."""

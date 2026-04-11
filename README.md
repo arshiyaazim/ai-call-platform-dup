@@ -2,39 +2,36 @@
 
 > AI-powered voice agent platform with an autonomous intelligence layer. Handles real-time phone calls via Twilio SIP and LiveKit WebRTC, backed by a multi-agent AI brain that plans, reasons, learns, and self-improves across every interaction.
 
-**Domain:** `iamazim.com` &nbsp;|&nbsp; **VPS:** Contabo (4 CPUs, 8 GB RAM, Ubuntu)  
-**Version:** Phase 5 — Autonomous AI System &nbsp;|&nbsp; **Containers:** 20+
+**Domain:** `iamazim.com` &nbsp;|&nbsp; **VPS:** Contabo (4 CPUs, 7.8 GB RAM, 73 GB disk, Ubuntu)  
+**Version:** Phase 6 — Ollama-First LLM Gateway &nbsp;|&nbsp; **Containers:** 38  
+**Last updated:** 2026-04-11
 
 ---
 
 ## Table of Contents
 
 - [Overview](#overview)
+- [LLM Strategy](#llm-strategy)
 - [Architecture](#architecture)
 - [Services](#services)
   - [Stack 1 — ai-infra (Foundation)](#stack-1--ai-infra-foundation)
   - [Stack 2 — dograh (Voice Platform)](#stack-2--dograh-voice-platform)
   - [Stack 3 — fazle-ai (Intelligence Layer)](#stack-3--fazle-ai-intelligence-layer)
-  - [Stack 4 — Phase-5 Autonomous Services](#stack-4--phase-5-autonomous-services)
-  - [Auxiliary — AI Watchdog & Control Plane](#auxiliary--ai-watchdog--control-plane)
 - [Fazle Personal AI System](#fazle-personal-ai-system)
   - [Multi-Agent Brain](#multi-agent-brain)
-  - [Autonomous AI (Phase 5)](#autonomous-ai-phase-5)
+  - [LLM Gateway](#llm-gateway)
   - [How a Call Flows](#how-a-call-flows)
 - [Dashboard](#dashboard)
 - [Networking & Domains](#networking--domains)
-- [Monitoring Stack](#monitoring-stack)
+- [Monitoring & Observability](#monitoring--observability)
 - [Database](#database)
 - [Security](#security)
 - [Deployment](#deployment)
-  - [Prerequisites](#prerequisites)
-  - [Quick Start](#quick-start)
-  - [Zero-Downtime Rolling Deploy](#zero-downtime-rolling-deploy)
-  - [Rollback](#rollback)
 - [Scripts Reference](#scripts-reference)
 - [Secrets Management](#secrets-management)
 - [Testing](#testing)
 - [Configuration Files](#configuration-files)
+- [Known Issues & Cost Drivers](#known-issues--cost-drivers)
 - [Roadmap](#roadmap)
 - [License](#license)
 
@@ -52,21 +49,51 @@ The platform combines two systems:
 Together they deliver an AI voice clone that answers phone calls, remembers conversations, autonomously plans and executes multi-step tasks, builds a knowledge graph from interactions, learns from its own behavior, and maintains relationship-specific behavior (family, friends, professional contacts) with content safety boundaries.
 
 **Key capabilities:**
+- **Ollama-first LLM** — all chat routed through local `qwen2.5:1.5b` with automatic OpenAI `gpt-4o` fallback (10 s timeout)
 - Real-time voice call handling (Twilio → LiveKit → STT → LLM → TTS)
-- Multi-agent brain with 5 specialized agents (conversation, memory, research, task, tool)
+- Multi-agent brain with 9+ specialized agents (conversation, memory, research, task, tool, voice, social, system, learning)
+- LLM gateway with caching (300 s TTL), rate limiting (60 RPM), request batching, PostgreSQL conversation logging, and trainable data export
 - Autonomous goal planning with self-reflection and retry logic
 - Tool execution engine with permission control and sandboxing
 - Knowledge graph tracking people, projects, conversations, and relationships
 - Background autonomous task runner (research, monitoring, digests, reminders)
 - Self-learning engine that detects patterns and optimizes agent routing
-- Personality injection with relationship-aware context
+- Personality injection with relationship-aware context (family, social, professional)
 - Semantic memory search over all past conversations (Qdrant vectors)
-- LLM gateway with caching, rate limiting, request batching, and OpenAI ↔ Ollama fallback
-- Async task queue with auto-scaling workers
-- Full observability: Prometheus + Grafana + Loki + Promtail
-- Self-healing infrastructure via AI Watchdog and AI Control Plane
+- Workflow engine for multi-step automation
+- Social engine with WhatsApp/Facebook intent detection
+- Guardrail engine for content safety enforcement
+- OpenTelemetry distributed tracing
+- Full observability: Prometheus + Grafana + Loki + Promtail + OTel
 - Zero-downtime blue/green deployments
 - Row-Level Security on all database tables
+
+---
+
+## LLM Strategy
+
+As of 2026-04-11, the platform runs **Ollama-first** with automatic OpenAI fallback:
+
+| Layer | Provider | Model | Purpose |
+|-------|----------|-------|---------|
+| **Primary chat** | Ollama (local) | `qwen2.5:1.5b` | All brain + trainer chat via LLM gateway |
+| **Fallback chat** | OpenAI (API) | `gpt-4o` | Triggered when Ollama times out (10 s) or errors |
+| **Voice fast path** | Ollama (direct) | `qwen2.5:1.5b` | `/chat/voice` bypasses gateway for TTFB |
+| **Emergency fallback** | Ollama (direct) | `qwen2.5:0.5b` | Last resort before static reply |
+| **Embeddings (primary)** | OpenAI | `text-embedding-3-small` | Memory service vector embeddings |
+| **Embeddings (fallback)** | Ollama | `nomic-embed-text` | Embedding fallback when OpenAI fails |
+| **Audio transcription** | OpenAI | `whisper-1` | Voice + multimodal uploads |
+| **Image captioning** | OpenAI | `gpt-4o` (vision) | Multimodal chat image analysis |
+| **TTS** | Deepgram / ElevenLabs | — | Voice synthesis (configurable) |
+
+**Installed Ollama models:** `qwen2.5:1.5b` (986 MB), `nomic-embed-text` (274 MB), `qwen2.5:0.5b` (397 MB), `qwen2.5:3b` (1.9 GB)
+
+**LLM Gateway routing:**
+1. Check Redis cache (300 s TTL) → return cached if hit
+2. Call Ollama `qwen2.5:1.5b` with 10 s timeout
+3. If Ollama fails/times out → fallback to OpenAI `gpt-4o`
+4. Log every exchange to `llm_conversation_log` in PostgreSQL (provider, model, latency, is_fallback, trainable)
+5. Fallback responses marked `trainable=true` for future fine-tuning export via `/training-data`
 
 ---
 
@@ -74,8 +101,9 @@ Together they deliver an AI voice clone that answers phone calls, remembers conv
 
 ```
                           ┌──────────────────────┐
-                          │      Nginx (SSL)     │
-                          │  iamazim.com :443     │
+                          │   Cloudflared Tunnel  │
+                          │   + Nginx (SSL)       │
+                          │   iamazim.com :443    │
                           └──┬─────┬─────┬────┬──┘
                              │     │     │    │
               ┌──────────────┘     │     │    └──────────────┐
@@ -91,8 +119,8 @@ Together they deliver an AI voice clone that answers phone calls, remembers conv
                         │  ┌─────────┐  ┌────────┐  ┌────────────┐ │
                         │  │  Brain  │  │ Memory │  │ LLM Gateway│ │
                         │  │  :8200  │  │ :8300  │  │   :8800    │ │
-                        │  │(5 agents)  └────┬───┘  └─────┬──────┘ │
-                        │  └────┬────┘       │            │         │
+                        │  │(9 agents)  └────┬───┘  └─────┬──────┘ │
+                        │  └────┬────┘       │      Ollama│→OpenAI  │
                         │       │       ┌────▼───┐  ┌────▼──────┐ │
                         │  ┌────▼────┐  │Trainer │  │  Queue    │ │
                         │  │ Tasks   │  │ :8600  │  │  :8810    │ │
@@ -100,39 +128,22 @@ Together they deliver an AI voice clone that answers phone calls, remembers conv
                         │  └─────────┘                   │         │
                         │                          ┌─────▼───────┐ │
                         │  ┌──────────┐ ┌────────┐ │  Workers    │ │
-                        │  │  Voice   │ │Learning│ │  :8820 × 4  │ │
+                        │  │  Voice   │ │Learning│ │  :8820 × 2  │ │
                         │  │  :8700   │ │ :8900  │ └─────────────┘ │
                         │  └──────────┘ └────────┘                 │
+                        │                                           │
+                        │  ┌──────────┐ ┌──────────┐ ┌──────────┐ │
+                        │  │ Social   │ │Workflow  │ │Guardrail │ │
+                        │  │ :9800    │ │ :9700    │ │ :9600    │ │
+                        │  └──────────┘ └──────────┘ └──────────┘ │
                         │  ┌──────────────────┐                    │
                         │  │ Web Intelligence │                    │
                         │  │     :8500        │                    │
                         │  └──────────────────┘                    │
-                        └───────────────┬──────────────────────────┘
-                                        │
-                        ┌───────────────▼──────────────────────────┐
-                        │       Phase 5 — Autonomous Services       │
                         │                                           │
-                        │  ┌────────────────┐  ┌────────────────┐  │
-                        │  │ Autonomy Engine│  │  Tool Engine   │  │
-                        │  │    :9100       │  │    :9200       │  │
-                        │  │ Goal planning  │  │ Tool registry  │  │
-                        │  │ & execution    │  │ & sandboxed    │  │
-                        │  └────────────────┘  │   execution    │  │
-                        │                      └────────────────┘  │
-                        │  ┌────────────────┐  ┌────────────────┐  │
-                        │  │Knowledge Graph │  │ Auto Runner    │  │
-                        │  │    :9300       │  │    :9400       │  │
-                        │  │ Entity &       │  │ Background     │  │
-                        │  │ relationship   │  │ tasks &        │  │
-                        │  │ tracking       │  │ scheduling     │  │
-                        │  └────────────────┘  └────────────────┘  │
-                        │  ┌────────────────┐                      │
-                        │  │ Self Learning  │                      │
-                        │  │    :9500       │                      │
-                        │  │ Pattern        │                      │
-                        │  │ analysis &     │                      │
-                        │  │ optimization   │                      │
-                        │  └────────────────┘                      │
+                        │  Autonomous: Autonomy(:9100) Tool(:9200) │
+                        │  KnowledgeGraph(:9300) Runner(:9400)     │
+                        │  SelfLearning(:9500)                     │
                         └───────────────┬──────────────────────────┘
                                         │
               ┌─────────────────────────┼───────────────────────────┐
@@ -143,6 +154,9 @@ Together they deliver an AI voice clone that answers phone calls, remembers conv
               │                                                     │
               │  LiveKit  Coturn  Prometheus  Grafana  Loki        │
               │  :7880    :3478   :9090       :3030    :3100       │
+              │                                                     │
+              │  OTel Collector  node-exporter  cAdvisor  Promtail │
+              │  :4317-4318      :9100          :8080     :9080    │
               └─────────────────────────────────────────────────────┘
 ```
 
@@ -150,7 +164,7 @@ Together they deliver an AI voice clone that answers phone calls, remembers conv
 
 ## Services
 
-The system deploys as **four Docker Compose stacks** started in order.
+The system deploys as **three Docker Compose stacks** plus a Cloudflare tunnel, totaling **38 containers**.
 
 ### Stack 1 — ai-infra (Foundation)
 
@@ -158,12 +172,12 @@ All shared infrastructure. Must start first.
 
 | Service | Image | Port | Purpose |
 |---------|-------|------|---------|
-| postgres | `pgvector/pgvector:pg17` | 5432 | PostgreSQL 17 + pgvector embeddings |
-| redis | `redis:7.2.5-alpine` | 6379 | Cache, pub/sub, streams, session store |
-| minio | `minio/minio:2025-09-07` | 9000 / 9001 | S3-compatible object storage (recordings, files) |
+| ai-postgres | `pgvector/pgvector:pg17` | 5432 | PostgreSQL 17 + pgvector embeddings |
+| ai-redis | `redis:7.2.5-alpine` | 6379 | Cache, pub/sub, streams, session store |
+| minio | `minio/minio` | 9000 | S3-compatible object storage (recordings, files) |
 | livekit | `livekit/livekit-server:v1.8.2` | 7880 / 7881 | WebRTC server for real-time audio |
 | qdrant | `qdrant/qdrant:v1.17.0` | 6333 | Vector database for semantic memory |
-| ollama | `ollama/ollama:0.3.14` | 11434 | Local LLM (fallback when OpenAI is unavailable) |
+| ollama | `ollama/ollama:0.3.14` | 11434 | Local LLM — primary provider (qwen2.5:1.5b) |
 | coturn | `coturn/coturn:4.6.2` | 3478 / 5349 | TURN/STUN NAT traversal for WebRTC |
 | prometheus | `prom/prometheus:latest` | 9090 | Metrics collection |
 | grafana | `grafana/grafana:latest` | 3030 | Monitoring dashboards |
@@ -171,6 +185,7 @@ All shared infrastructure. Must start first.
 | promtail | `grafana/promtail:latest` | 9080 | Log shipping → Loki |
 | node-exporter | `prom/node-exporter:latest` | 9100 | Host-level metrics |
 | cadvisor | `gcr.io/cadvisor/cadvisor:latest` | 8080 | Container metrics |
+| cloudflared-tunnel | `cloudflare/cloudflared` | — | Cloudflare tunnel for edge routing |
 
 ### Stack 2 — dograh (Voice Platform)
 
@@ -178,54 +193,47 @@ Pre-built Dograh containers for voice call handling.
 
 | Service | Image | Port | Purpose |
 |---------|-------|------|---------|
-| api | `dograhai/dograh-api:1.0.0` | 8000 | FastAPI backend — call routing, STT/TTS, webhooks |
-| ui | `dograhai/dograh-ui:1.0.0` | 3010 | Next.js dashboard — call management |
+| dograh-api | `dograhai/dograh-api:1.0.0` | 8000 | FastAPI backend — call routing, STT/TTS, webhooks |
+| dograh-ui | `dograhai/dograh-ui:1.0.0` | 3010 | Next.js dashboard — call management |
 
 ### Stack 3 — fazle-ai (Intelligence Layer)
 
-Custom-built Fazle services. Each builds from `fazle-system/`.
+All Fazle services — core intelligence, Phase-5 autonomous services, and supporting infrastructure — in a single Compose file. Each builds from `fazle-system/`.
 
 | Service | Port | Purpose |
 |---------|------|---------|
+| **Core** | | |
 | fazle-api | 8100 | API Gateway — routing, JWT auth, rate limiting, Phase-5 proxy |
-| fazle-brain | 8200 | Multi-agent reasoning engine — 5 agents, personality injection |
-| fazle-memory | 8300 | Vector memory — Qdrant semantic search, context retrieval |
+| fazle-brain | 8200 | Multi-agent reasoning — 9+ agents, Ollama-first via gateway |
+| fazle-memory | 8300 | Vector memory — Qdrant semantic search, OpenAI embeddings |
 | fazle-task-engine | 8400 | Scheduler — reminders, recurring tasks (APScheduler) |
 | fazle-web-intelligence | 8500 | Web search & scraping (Serper API, BeautifulSoup) |
 | fazle-trainer | 8600 | ML training — preference extraction, fine-tuning |
-| fazle-voice | 8700 | Voice processing — accent modulation, cloning |
+| fazle-voice | 8700 | Voice processing — LiveKit STT/TTS, accent modulation |
 | fazle-ui | 3020 | Next.js dashboard — settings, conversations, Phase-5 management |
-| fazle-llm-gateway | 8800 | Centralized LLM routing with cache & rate limits |
+| **LLM Infrastructure** | | |
+| fazle-llm-gateway | 8800 | Centralized LLM routing — Ollama→OpenAI fallback, caching, DB logging |
 | fazle-queue | 8810 | Async request queue (Redis Streams) |
+| fazle-workers ×2 | 8820 | Worker pool consuming from queue |
+| **Autonomous AI** | | |
+| fazle-autonomy-engine | 9100 | Goal decomposition — multi-step plans with self-reflection |
+| fazle-tool-engine | 9200 | Tool registry — permission control, sandboxed execution |
+| fazle-knowledge-graph | 9300 | Entity & relationship store — people, projects, conversations |
+| fazle-autonomous-runner | 9400 | Background task runner — research, monitoring, digests |
+| fazle-self-learning | 9500 | Pattern analysis — behavioral insights, routing optimization |
+| **Extended Services** | | |
+| fazle-guardrail-engine | 9600 | Content safety — input/output moderation |
+| fazle-workflow-engine | 9700 | Multi-step workflow automation |
+| fazle-social-engine | 9800 | WhatsApp/Facebook — intent detection, contact intelligence |
 | fazle-learning-engine | 8900 | Self-improvement — conversation analysis, knowledge extraction |
-| fazle-workers | 8820 | Worker pool (4 replicas) consuming from queue |
-
-### Stack 4 — Phase-5 Autonomous Services
-
-Five new microservices enabling autonomous operation. Deployed via `phase5-standalone.yaml`.
-
-| Service | Port | Purpose |
-|---------|------|---------|
-| fazle-autonomy-engine | 9100 | Goal decomposition — breaks goals into multi-step plans with self-reflection and retry |
-| fazle-tool-engine | 9200 | Tool orchestration — registry, permission control, sandboxed execution (6 built-in tools) |
-| fazle-knowledge-graph | 9300 | Entity & relationship store — people, projects, conversations, topics with link tracking |
-| fazle-autonomous-runner | 9400 | Background task runner — research, monitoring, digests, reminders on interval/cron triggers |
-| fazle-self-learning | 9500 | Pattern analysis — detects behavioral patterns, optimizes agent routing, generates insights |
-
-All Phase-5 services expose `/health` and `/metrics` (Prometheus) endpoints. The API gateway proxies all Phase-5 routes through `/fazle/autonomy/*`, `/fazle/tool-engine/*`, `/fazle/knowledge-graph/*`, and `/fazle/self-learning/*`.
-
-### Auxiliary — AI Watchdog & Control Plane
-
-| Component | Purpose |
-|-----------|---------|
-| **AI Watchdog** | Self-healing monitor — checks containers every 30 s, auto-restarts unhealthy services, manages disk space, auto-scales workers based on queue depth. |
-| **AI Control Plane** | LLM-powered DevOps agent — snapshots system state every 60 s, uses AI reasoning to diagnose issues and execute repairs (restart, scale, cleanup). Produces daily JSON reports. |
+| **Observability** | | |
+| fazle-otel-collector | 4317-4318 | OpenTelemetry collector — distributed tracing |
 
 ---
 
 ## Fazle Personal AI System
 
-Fazle is a layered intelligence system composed of 17 microservices across 5 layers:
+Fazle is a layered intelligence system composed of 22 microservices:
 
 ```
 Layer 1  API Gateway (fazle-api :8100)
@@ -233,54 +241,50 @@ Layer 1  API Gateway (fazle-api :8100)
            ├── Phase-5 proxy routes (autonomy, tools, KG, learning)
            │
 Layer 2  Brain + Agents (fazle-brain :8200)
-           ├── Multi-agent orchestration (5 agents)
+           ├── Multi-agent orchestration (9+ agents)
            ├── Query routing: FAST_VOICE / CONVERSATION / FULL_PIPELINE
            ├── Personality injection from persona definitions
+           ├── USE_LLM_GATEWAY=true → routes chat through gateway
            │
            │   ┌─────────────────────────────────────────────────────┐
            │   │  Agent Manager                                      │
-           │   │  ├── ConversationAgent — direct LLM responses       │
-           │   │  ├── MemoryAgent — semantic recall & fact storage    │
-           │   │  ├── ResearchAgent — web search & content scraping   │
-           │   │  ├── TaskAgent — scheduling & reminders              │
-           │   │  └── ToolAgent — plugin-based tool execution         │
+           │   │  Strategy Tier:                                     │
+           │   │  ├── StrategyAgent — domain routing coordinator     │
+           │   │  Domain Agents:                                     │
+           │   │  ├── SocialAgent — WhatsApp/FB intent + contacts   │
+           │   │  ├── VoiceAgent — ultra-low latency voice calls    │
+           │   │  ├── SystemAgent — governor + autonomy coordination│
+           │   │  ├── LearningAgent — corrections + memory storage  │
+           │   │  Utility Agents:                                    │
+           │   │  ├── ConversationAgent — direct LLM responses      │
+           │   │  ├── MemoryAgent — semantic recall & fact storage   │
+           │   │  ├── ResearchAgent — web search & content scraping  │
+           │   │  ├── TaskAgent — scheduling & reminders             │
+           │   │  └── ToolAgent — plugin-based tool execution        │
            │   └─────────────────────────────────────────────────────┘
            │
-         Memory (fazle-memory :8300)
-           ├── Qdrant vector search
+Layer 3  Memory (fazle-memory :8300)
+           ├── Qdrant vector search (OpenAI embeddings → Ollama fallback)
            ├── Embedding generation
-           └── Context retrieval
-           │
-Layer 3  Tasks (fazle-task-engine :8400)     Tools (fazle-web-intelligence :8500)
-           ├── Scheduling (APScheduler)         ├── Web search (Serper)
-           └── Reminders & automation           └── Scraping + summarization
-           │
-         Trainer (fazle-trainer :8600)
-           ├── Preference extraction
-           └── Fine-tuning
+           └── Structured knowledge (PostgreSQL)
            │
 Layer 4  LLM Gateway (fazle-llm-gateway :8800)
-           ├── Response caching (300 s TTL)
-           ├── Rate limiting (10 req/s)
-           ├── Request batching (75 ms / 4)
-           └── Model fallback (OpenAI → Ollama)
+           ├── Ollama qwen2.5:1.5b (10s timeout) → OpenAI gpt-4o fallback
+           ├── Response caching (300s TTL)
+           ├── Rate limiting (60 RPM / 10 req/s per user)
+           ├── Request batching (75ms window / 4 max)
+           ├── PostgreSQL conversation logging (llm_conversation_log)
+           └── Trainable data export (/training-data)
            │
-         Learning Engine (fazle-learning-engine :8900)
-           ├── Conversation analysis
-           ├── Relationship graph updates
-           ├── Correction processing
-           └── Nightly batch learning
+Layer 5  Extended Services
+           ├── Social Engine (:9800) — WhatsApp/FB platform routing
+           ├── Workflow Engine (:9700) — multi-step automation
+           ├── Guardrail Engine (:9600) — content safety
+           ├── Learning Engine (:8900) — conversation analysis
+           ├── Tasks (:8400), Web Intelligence (:8500), Trainer (:8600)
+           └── Queue (:8810) + Workers ×2 (:8820)
            │
-         Queue (fazle-queue :8810) + Workers (fazle-workers × 4 :8820)
-           ├── Redis Streams consumer group
-           ├── Async request handling
-           └── Auto-scaling (2–4 workers)
-           │
-Layer 5  Voice (fazle-voice :8700)           UI (fazle-ui :3020)
-           ├── Accent/tone personalization      ├── Next.js 14 dashboard
-           └── Voice cloning                    └── Phase-5 management pages
-           │
-Layer 6  Autonomous AI (Phase 5)
+Layer 6  Autonomous AI
            ├── Autonomy Engine (:9100) — goal planning & execution
            ├── Tool Engine (:9200) — secure tool orchestration
            ├── Knowledge Graph (:9300) — entity relationship store
@@ -290,59 +294,71 @@ Layer 6  Autonomous AI (Phase 5)
 
 ### Multi-Agent Brain
 
-The Brain service runs an **Agent Manager** that orchestrates 5 specialized agents through a pipeline:
+The Brain service (`USE_LLM_GATEWAY=true`, `LLM_PROVIDER=ollama`, `LLM_MODEL=qwen2.5:1.5b`) runs an **Agent Manager** with a two-tier architecture:
 
-| Agent | Role | Trigger Keywords |
-|-------|------|-----------------|
-| **ConversationAgent** | Direct LLM responses (Ollama fast path or gateway) | Default fallback for all queries |
-| **MemoryAgent** | Semantic memory recall, fact storage | "remember", "what did I", "who is", "my preference" |
-| **ResearchAgent** | Web search, content scraping, summarization | "search", "find", "look up", "latest", "news" |
-| **TaskAgent** | Task creation, scheduling, reminders | "remind", "schedule", "set up", "tomorrow" |
-| **ToolAgent** | Plugin tool discovery and execution | "send email", "run code", "check calendar" |
+**Strategy Tier** — StrategyAgent routes to the correct domain agent based on platform, caller, and intent.
 
-**Query routing** classifies incoming messages into three paths:
-- **FAST_VOICE** — Simple greetings via voice, routed directly to Ollama for ultra-low latency
-- **CONVERSATION** — Normal conversation with basic memory context
-- **FULL_PIPELINE** — Complex queries running all agents (memory + research + task + tool + LLM)
+**Domain Agents (4):**
 
-### Autonomous AI (Phase 5)
+| Agent | Role | Trigger |
+|-------|------|---------|
+| **SocialAgent** | WhatsApp/Facebook interactions — intent classification (HOT/WARM/COLD/RISK), contact intelligence | Platform = whatsapp/facebook |
+| **VoiceAgent** | Voice call interactions — ultra-low latency, direct Ollama | Platform = voice |
+| **SystemAgent** | Governor v2 status, autonomy coordination, self-development patches | System queries |
+| **LearningAgent** | Correction processing, permanent memory storage, instruction learning | Correction/feedback |
 
-Five microservices that give Fazle the ability to act independently:
+**Utility Agents (5):**
 
-**Autonomy Engine** (:9100) — Receives high-level goals and decomposes them into multi-step plans. Each plan step can invoke tools, query memory, or call the LLM. Supports self-reflection after execution, automatic retry (up to 3 attempts), and plan status tracking (pending → planning → executing → reflecting → completed).
+| Agent | Role |
+|-------|------|
+| **ConversationAgent** | Direct LLM conversation (default fallback) |
+| **MemoryAgent** | Semantic memory recall, fact storage |
+| **ResearchAgent** | Web search, content scraping, summarization |
+| **TaskAgent** | Task creation, scheduling, reminders |
+| **ToolAgent** | Plugin tool discovery and execution |
 
-**Tool Engine** (:9200) — Manages a registry of 6 built-in tools with permission control:
-| Tool | Category | Requires Approval |
-|------|----------|-------------------|
-| `web_search` | Web search | No |
-| `http_request` | HTTP requests | Yes |
-| `memory_search` | Memory operations | No |
-| `memory_store` | Memory operations | No |
-| `summarize` | Summarization | No |
-| `code_sandbox` | Code execution | Yes |
+**Query complexity classification** determines LLM routing:
+- `simple` → greetings, yes/no, short (<8 chars) → fast path
+- `medium` → single questions, factual lookups → standard pipeline
+- `complex` → multi-part reasoning, analysis → full pipeline with all agents
 
-Tools can be enabled/disabled per-tool. Dangerous operations (HTTP requests, code execution) require explicit approval.
+### LLM Gateway
 
-**Knowledge Graph** (:9300) — Maintains an in-memory graph of entities and relationships extracted from conversations. Supports 8 node types (person, project, company, conversation, task, topic, location, concept) and 10 relationship types (works_with, belongs_to, discussed_in, related_to, etc.). Provides context enrichment for the Brain via `/context/{node_id}`.
+**Current deployed configuration:**
 
-**Autonomous Runner** (:9400) — Executes background tasks on schedules (interval, cron, or one-shot). Task types include research, monitoring, reminders, digests, and learning. Limits to 5 concurrent tasks with a 5-minute runtime cap per task.
+```
+LLM_PROVIDER=ollama
+OLLAMA_MODEL=qwen2.5:1.5b
+OLLAMA_TIMEOUT=10
+FALLBACK_PROVIDER=openai
+FALLBACK_MODEL=gpt-4o
+CACHE_TTL=300
+RATE_LIMIT_RPM=60
+RATE_LIMIT_PER_USER_RPS=10
+BATCH_WINDOW_MS=75
+BATCH_MAX_SIZE=4
+DATABASE_URL=postgresql://postgres:***@postgres:5432/postgres
+```
 
-**Self Learning** (:9500) — Analyzes conversation patterns and agent performance. Detects 6 insight types: patterns, preferences, improvements, routing optimizations, knowledge gaps, and behavioral insights. Tracks metrics per agent (latency, success rate, user satisfaction) and suggests routing optimizations.
+**DB logging (llm_conversation_log):**
+Every LLM request/response is logged with: provider, model, system prompt hash, user prompt, reply, latency_ms, is_fallback, trainable, timestamp.
+
+**Training data export:** `GET /training-data?limit=100` returns all rows where `trainable=true` (OpenAI fallback responses) for future Ollama fine-tuning.
 
 ### How a Call Flows
 
 1. Incoming Twilio SIP call → **Dograh API** receives webhook
 2. Audio streamed via **LiveKit** WebRTC room
 3. Real-time STT transcribes caller speech
-4. **Agent Manager** in Brain classifies query → routes to agent pipeline
+4. **Brain** classifies query complexity → routes to agent pipeline
 5. **MemoryAgent** retrieves relevant context from Qdrant
-6. **ResearchAgent** / **TaskAgent** / **ToolAgent** contribute if triggered
-7. **LLM Gateway** generates response (cached / rate-limited / batched)
-8. Response injected with personality from `personality/*.md`
+6. System prompt built with personality, relationship tone, and knowledge context (truncated to ~800 chars for CPU budget)
+7. **LLM Gateway** generates response: Ollama first (10 s) → OpenAI fallback → logged to DB
+8. Response humanized (AI-isms removed) + confidence check
 9. TTS converts response to audio, streamed back via LiveKit
-10. **Knowledge Graph** updates entities and relationships
-11. **Self Learning** asynchronously analyzes the interaction
-12. **Memory** stores embeddings; **Trainer** extracts preferences
+10. Conversation stored in Redis (24h TTL) + memory service
+11. **Knowledge Graph** updates entities and relationships (async)
+12. **Self Learning** analyzes the interaction (async)
 
 ---
 
@@ -398,20 +414,21 @@ Pages marked in **bold** were added in Phase 5.
 
 ---
 
-## Monitoring Stack
+## Monitoring & Observability
 
-**Prometheus → Grafana → Loki → Promtail**
+**Prometheus → Grafana → Loki → Promtail → OpenTelemetry**
 
 | Component | Port | Function |
 |-----------|------|----------|
-| Prometheus | 9090 | Scrapes metrics from all services (15 min retention) |
+| Prometheus | 9090 | Scrapes metrics from all services |
 | Grafana | 3030 | Dashboards and alerting |
 | Loki | 3100 | Centralized log storage |
 | Promtail | 9080 | Ships Docker container logs to Loki |
 | node-exporter | 9100 | Host CPU, memory, disk, network metrics |
 | cAdvisor | 8080 | Per-container resource metrics |
+| fazle-otel-collector | 4317-4318 | OpenTelemetry — distributed tracing across Fazle services |
 
-**Metrics collected:** CPU/memory/disk (host + container), PostgreSQL queries, Redis operations, LiveKit status, LLM gateway cache hit rates, queue depth, worker throughput, and per-service Prometheus client metrics.
+**Metrics collected:** CPU/memory/disk (host + container), PostgreSQL queries, Redis operations, LiveKit status, LLM gateway cache hit rates, Ollama vs OpenAI fallback ratios, queue depth, worker throughput, and per-service Prometheus client metrics.
 
 ---
 
@@ -434,6 +451,7 @@ Pages marked in **bold** were added in Phase 5.
 | `fazle_learning_runs` | Fazle | Learning job history |
 | `fazle_scheduler_jobs` | Fazle | Scheduled tasks & reminders |
 | `fazle_web_intelligence_cache` | Fazle | Cached web search results & summaries |
+| `llm_conversation_log` | Gateway | Every LLM request/response — provider, model, latency, fallback flag, trainable flag |
 
 ### Vector Storage
 
@@ -728,7 +746,7 @@ Additional configs:
 ### 4. Create AI Agent
 1. Click "New Agent" → "Inbound"
 2. Paste content from `personality/personality.md` as system prompt
-3. Select LLM: GPT-4o / GPT-4o-mini
+3. LLM: Ollama `qwen2.5:1.5b` (primary) with OpenAI `gpt-4o` fallback via gateway
 4. Select TTS: Deepgram / ElevenLabs
 5. Select STT: Deepgram
 6. Save and test with "Web Call"
@@ -775,7 +793,7 @@ bash scripts/health-check.sh
 | 0 | Default (Dograh, LiveKit) | Session data, coordination |
 | 1 | Fazle Brain | Conversation cache (24h TTL) |
 | 2 | Fazle Trainer | Training session tracking |
-| 3 | LLM Gateway | Response cache (300s TTL), rate limits (10 req/s), usage stats |
+| 3 | LLM Gateway | Response cache (300s TTL), rate limits (10 req/s), Ollama→OpenAI fallback stats |
 | 4 | Learning Engine | Relationship graph, user corrections |
 | 5 | Queue + Workers | Redis Streams for async LLM requests |
 
@@ -812,11 +830,12 @@ bash scripts/health-check.sh
 
 | Setting | Value | Rationale |
 |---------|-------|-----------|
-| NUM_PARALLEL | 1 | Prevent RAM exhaustion on 7.8GB VPS |
+| NUM_PARALLEL | 1 | Prevent RAM exhaustion on 7.8 GB VPS |
 | MAX_LOADED_MODELS | 1 | Only load one model at a time |
 | MAX_QUEUE | 2 | Prevent request pile-up |
 | Memory limit | 6 GB | Hard ceiling |
-| Installed model | qwen2.5:3b (1.9GB) | Only model on VPS |
+| Primary model | qwen2.5:1.5b (986 MB) | Fast inference, fits in RAM alongside all services |
+| Installed models | qwen2.5:1.5b, qwen2.5:0.5b, qwen2.5:3b, nomic-embed-text | 4 models, ~3.5 GB total disk |
 
 ---
 
@@ -844,6 +863,26 @@ openssl s_client -connect turn.iamazim.com:5349
 
 ---
 
+## Known Issues & Cost Drivers
+
+### OpenAI Cost Drivers (as of 2026-04-11)
+
+| # | Driver | Impact | Location |
+|---|--------|--------|----------|
+| 1 | **Brain parallel fan-out** | Fires Ollama direct + gateway simultaneously → double Ollama load → more timeouts → more OpenAI fallbacks | brain/main.py `query_llm_smart()` |
+| 2 | **Hidden owner profile extraction** | Background LLM call after every owner message to extract identity info | brain/main.py `_extract_owner_profile_from_message()` |
+| 3 | **Embeddings OpenAI-first** | Memory service tries `text-embedding-3-small` first for every store/search/ingest, falls back to Ollama `nomic-embed-text` | memory/main.py `get_embedding()` |
+| 4 | **Multimodal embeddings OpenAI-only** | `text-embedding-3-large` with no Ollama fallback | memory/main.py `get_multimodal_embedding()` |
+| 5 | **GPT-4o vision captioning** | Every uploaded image goes through GPT-4o vision | api/main.py `_caption_image_gpt4o()` |
+| 6 | **Whisper transcription** | Every audio upload uses `whisper-1` API | api/main.py + brain/main.py |
+
+### Known Technical Issues
+
+- On 4-CPU VPS, Ollama inference with `qwen2.5:1.5b` averages 5-7 s, often exceeding the 10 s gateway timeout → high fallback rate to OpenAI
+- Brain's parallel fan-out (`query_llm_smart`) causes Ollama contention: two simultaneous requests compete for the single-threaded Ollama instance
+
+---
+
 ## Roadmap
 
 ### Completed
@@ -854,16 +893,17 @@ openssl s_client -connect turn.iamazim.com:5349
 | Phase 2 | Firewall, ports, network isolation | Deployed |
 | Phase 3 | TLS/SSL, Certbot, Coturn hardening | Deployed |
 | Phase 4 | Database RLS, security hardening, learning system | Deployed |
-| Phase 5 | Autonomous AI — multi-agent brain, autonomy engine, tool engine, knowledge graph, autonomous runner, self-learning | Deployed (2026-03-19) |
+| Phase 5 | Autonomous AI — multi-agent brain, autonomy engine, tool engine, knowledge graph, runner, self-learning | Deployed (2026-03-19) |
+| Phase 6 | Ollama-first LLM gateway — caching, fallback, DB logging, training data export | Deployed (2026-04-10) |
 
 ### Planned
 
+- **Single gateway architecture** — Remove brain's parallel fan-out, route ALL LLM calls through gateway only
+- **Embedding migration** — Switch memory service to Ollama `nomic-embed-text` primary, OpenAI fallback
+- **Ollama fine-tuning** — Train on collected OpenAI fallback responses from `llm_conversation_log`
 - **Voice AI Training** — Custom voice model training pipeline
-- **Voice Cloning** — Full voice clone with accent/tone personalization
 - **PII Redaction** — Strip personal data before storing extracted knowledge
-- **PWA Support** — Service worker, manifest, and offline capabilities
 - **CI/CD Pipeline** — Automated testing and deployment
-- **Coturn Rootless** — Run Coturn with `CAP_NET_BIND_SERVICE` instead of root
 
 ---
 
