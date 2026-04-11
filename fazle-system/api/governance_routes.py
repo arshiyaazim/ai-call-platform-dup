@@ -301,7 +301,7 @@ def delete_phrasing(phrasing_id: str, _=Depends(require_admin)):
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("""
                     UPDATE fazle_knowledge_phrasing
-                    SET status = 'deprecated', deprecated_at = NOW()
+                    SET status = 'deprecated', updated_at = NOW()
                     WHERE id = %s AND status = 'active'
                     RETURNING id, topic, status
                 """, (phrasing_id,))
