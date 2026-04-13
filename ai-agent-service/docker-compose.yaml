@@ -41,11 +41,6 @@ services:
           memory: 128M
         reservations:
           memory: 64M
-    depends_on:
-      livekit:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:3200/health || exit 1"]
       interval: 30s

@@ -4,8 +4,8 @@ WORKDIR /app
 
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
-COPY package.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+COPY package.json package-lock.json* ./
+RUN npm install --omit=dev && npm cache clean --force
 
 COPY *.js ./
 
