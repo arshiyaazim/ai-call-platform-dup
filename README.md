@@ -347,8 +347,9 @@ Every LLM request/response is logged with: provider, model, system prompt hash, 
 
 ### How a Call Flows
 
-1. Incoming Twilio SIP call → **Dograh API** receives webhook
-2. Audio streamed via **LiveKit** WebRTC room
+1. Incoming Twilio SIP call → **Dograh API** receives webhook at `/api/v1/telephony/inbound/{workflow_id}`
+   - Nginx maps `https://iamazim.com/telephony/` → `dograh-api:8000/api/v1/telephony/`
+2. Audio streamed via **LiveKit** WebRTC room (TURN via `turn.iamazim.com`)
 3. Real-time STT transcribes caller speech
 4. **Brain** classifies query complexity → routes to agent pipeline
 5. **MemoryAgent** retrieves relevant context from Qdrant
@@ -767,8 +768,14 @@ Additional configs:
 ### 5. Connect Twilio Phone Number
 1. Dashboard → Settings → Telephony → Add Twilio
 2. Enter Account SID + Auth Token
-3. Purchase/assign phone number
-4. Dograh auto-configures the webhook
+3. Purchase/assign phone number (your number: `+447863767879`)
+4. Dograh auto-configures the webhook to `https://iamazim.com/telephony/inbound/{workflow_id}`
+5. **Verify in Twilio Console** → Phone Numbers → your number → Voice Configuration:
+   - "A Call Comes In" → Webhook → `https://iamazim.com/telephony/inbound/{workflow_id}` (POST)
+   - Replace `{workflow_id}` with your Dograh workflow ID (e.g., `2`)
+
+> **Note:** Twilio credentials are stored in the database via the Dograh UI, NOT as environment variables.
+> The nginx location `/telephony/` proxies to `dograh-api /api/v1/telephony/`.
 
 ---
 
@@ -868,6 +875,24 @@ stun turn.iamazim.com:3478
 openssl s_client -connect turn.iamazim.com:5349
 ```
 
+> **Coturn denied-peer-ip:** The TURN relay must be able to reach Docker container networks
+> (172.17–172.31). Only `172.16.0.0/16` is denied. If ICE candidates fail, check
+> `configs/coturn/turnserver.conf` → `denied-peer-ip` rules.
+
+### Twilio webhook not working
+```bash
+# Test webhook returns TwiML:
+curl -s -X POST https://iamazim.com/telephony/inbound/2 -d 'From=+1234567890'
+# Expected: <Response>...</Response> (not 404)
+
+# Check Dograh API directly:
+curl -s -X POST http://127.0.0.1:8000/api/v1/telephony/inbound/2 -d 'From=+1234567890'
+
+# Verify credentials stored in DB:
+docker exec ai-postgres psql -U postgres -d postgres -t \
+  -c "SELECT key, value FROM organization_configurations WHERE key='TELEPHONY_CONFIGURATION';"
+```
+
 ### Call quality problems
 - Check API response time: `curl -w "%{time_total}" https://api.iamazim.com/api/v1/health`
 - Check LiveKit connectivity: Browser DevTools → Network → WS tab
@@ -893,6 +918,7 @@ openssl s_client -connect turn.iamazim.com:5349
 
 - On 4-CPU VPS, Ollama inference with `qwen2.5:1.5b` averages 5-7 s, often exceeding the 10 s gateway timeout → high fallback rate to OpenAI
 - Brain's parallel fan-out (`query_llm_smart`) causes Ollama contention: two simultaneous requests compete for the single-threaded Ollama instance
+- LiveKit reports "high cpu load" on 4-CPU VPS with 38 containers — consider VPS upgrade (8 vCPU / 16 GB recommended) for production voice calls
 
 ---
 
