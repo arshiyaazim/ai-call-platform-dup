@@ -10,6 +10,7 @@
 const {
   WebhookReceiver,
   RoomServiceClient,
+  AgentDispatchClient,
   AccessToken,
 } = require("livekit-server-sdk");
 const { config } = require("./config");
@@ -94,6 +95,19 @@ async function hasAgentInRoom(roomName) {
 
 // ── Agent Dispatch ─────────────────────────────────────────
 
+let _dispatchClient = null;
+
+function getDispatchClient() {
+  if (!_dispatchClient) {
+    _dispatchClient = new AgentDispatchClient(
+      config.livekit.host,
+      config.livekit.apiKey,
+      config.livekit.apiSecret
+    );
+  }
+  return _dispatchClient;
+}
+
 /**
  * Generate a server-to-server JWT for LiveKit API calls.
  */
@@ -109,7 +123,7 @@ async function generateServerToken() {
 
 /**
  * Dispatch the fazle-voice agent to a LiveKit room.
- * Uses the Agent Dispatch Twirp API (LiveKit v1.6+).
+ * Uses the SDK's AgentDispatchClient for proper auth.
  *
  * @param {string} roomName  Target room
  * @param {object} metadata  Optional metadata to pass to agent
@@ -126,55 +140,27 @@ async function dispatchAgent(roomName, metadata = {}) {
   }
 
   try {
-    const jwt = await generateServerToken();
-    const url = `${config.livekit.host}/twirp/livekit.AgentDispatchService/CreateDispatch`;
+    const client = getDispatchClient();
+    const metaStr = Object.keys(metadata).length > 0
+      ? JSON.stringify(metadata)
+      : undefined;
 
-    const body = JSON.stringify({
-      room: roomName,
-      agent_name: "", // empty = dispatch to any available worker (fazle-voice)
-      metadata: JSON.stringify(metadata),
+    const dispatch = await client.createDispatch(roomName, "", {
+      metadata: metaStr,
     });
 
-    const controller = new AbortController();
-    const timeout = setTimeout(
-      () => controller.abort(),
-      config.safety.dispatchTimeoutMs
-    );
-
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${jwt}`,
-      },
-      body,
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeout);
     const latencyMs = Date.now() - startMs;
-
-    if (resp.ok) {
-      const result = await resp.json();
-      log.info("Agent dispatched successfully", {
-        room: roomName,
-        dispatch_id: result.dispatch_id || result.id || "unknown",
-        latency_ms: latencyMs,
-      });
-      return true;
-    }
-
-    const errText = await resp.text();
-    log.error("Agent dispatch API error", {
+    log.info("Agent dispatched successfully", {
       room: roomName,
-      status: resp.status,
-      body: errText.slice(0, 500),
+      dispatch_id: dispatch?.agentName || dispatch?.id || "unknown",
       latency_ms: latencyMs,
     });
-    return false;
+    return true;
   } catch (err) {
     const latencyMs = Date.now() - startMs;
-    log.error("Agent dispatch failed", {
+
+    // If dispatch fails, fazle-voice auto-dispatch should still pick up the room
+    log.warn("Explicit agent dispatch failed — relying on auto-dispatch", {
       room: roomName,
       error: err.message,
       latency_ms: latencyMs,
