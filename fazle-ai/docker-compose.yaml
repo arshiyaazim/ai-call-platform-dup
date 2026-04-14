@@ -119,6 +119,7 @@ services:
       VOICE_FAST_MODEL: "${FAZLE_OLLAMA_MODEL:-qwen2.5:1.5b}"
       PERSONA_CACHE_TTL: "${PERSONA_CACHE_TTL:-300}"
       MEMORY_TOP_K: "${MEMORY_TOP_K:-2}"
+      FAZLE_DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD not set}@postgres:5432/${POSTGRES_DB:-postgres}"
     logging:
       driver: "json-file"
       options:
