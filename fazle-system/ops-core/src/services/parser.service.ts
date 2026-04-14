@@ -88,7 +88,11 @@ export function parseMobiles(text: string): ParsedMobile[] {
 const AMOUNT_RE = /(\d[\d,]*)\s*(?:\/-|tk|taka)?/gi;
 
 export function parseAmount(text: string): number | null {
-  const m = AMOUNT_RE.exec(text);
+  // Strip phone numbers before extracting amounts so phone digits
+  // aren't mistaken for currency values
+  const cleaned_text = text.replace(/(?:\+?880|0)1[3-9]\d{8}/g, ' ');
+  const re = new RegExp(AMOUNT_RE.source, 'gi');
+  const m = re.exec(cleaned_text);
   if (!m) return null;
   const cleaned = m[1].replace(/,/g, '');
   const num = parseInt(cleaned, 10);

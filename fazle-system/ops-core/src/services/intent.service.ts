@@ -68,7 +68,10 @@ export function detectIntent(text: string): Intent {
   }
 
   // Payment: amount + mobile or method marker
-  const hasAmount = AMOUNT_RE.test(trimmed);
+  // Strip phone numbers before checking for amounts to avoid treating
+  // phone numbers like 01958122300 as payment amounts
+  const textWithoutMobiles = trimmed.replace(/(?:\+?880|0)1[3-9]\d{8}/g, ' ').trim();
+  const hasAmount = AMOUNT_RE.test(textWithoutMobiles);
   const hasMobile = MOBILE_RE.test(trimmed);
   const hasMethod = METHOD_RE.test(trimmed);
 
