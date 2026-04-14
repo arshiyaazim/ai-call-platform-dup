@@ -30,6 +30,64 @@ import base64
 logger = logging.getLogger("fazle-social-engine")
 
 
+# ── Reply Safety Classifier (inline — avoids cross-container imports) ──
+_RESTRICTED_KW = (
+    "টাকা পেয়েছ", "বেতন দিয়েছ", "advance", "payment details",
+    "হিসাব", "ব্যালেন্স", "profit", "loss", "revenue", "expense",
+    "লাভ", "ক্ষতি", "আয়", "ব্যয়",
+    "vessel name", "ship name", "জাহাজের নাম", "route details",
+    "cargo details", "consignment", "lc number", "bl number",
+    "employee salary", "কর্মীর বেতন", "nid number", "passport",
+    "bank account", "ব্যাংক একাউন্ট",
+    "owner personal", "বসের ব্যক্তিগত",
+)
+_SAFE_PAT = (
+    "survey scout", "সার্ভে স্কট", "সিকিউরিটি গার্ড",
+    "চাকরি", "job", "vacancy", "পদ", "নিয়োগ",
+    "আবেদন", "application", "apply",
+    "যোগ্যতা", "qualification", "experience", "অভিজ্ঞতা",
+    "প্রশিক্ষণ", "training",
+    "অফিসে আসুন", "অফিসে এসে",
+    "cv পাঠান", "cv নিয়ে",
+    "১২,০০০", "১৫,০০০", "১৮,০০০", "12,000", "15,000", "18,000",
+    "আসসালামু আলাইকুম", "ওয়ালাইকুম", "ধন্যবাদ", "স্বাগতম",
+    "কিভাবে সাহায্য", "how can i help",
+    "ভিক্টোরিয়া গেইট", "পাহাড়তলী", "চট্টগ্রাম",
+    "01958", "office",
+    "সিকিউরিটি সার্ভিস", "security service", "manpower",
+    "guard", "গার্ড",
+    "অভিযোগ", "complaint", "সমস্যা",
+    "বুঝতে পারছি না", "আবার বলুন",
+)
+
+
+def _classify_reply_safety(message: str, reply: str, relation: str = "unknown") -> str:
+    """Return 'safe' (auto-send) or 'restricted' (draft for owner)."""
+    rl = reply.lower()
+    ml = message.lower()
+    if relation in ("owner", "family"):
+        return "safe"
+    for kw in _RESTRICTED_KW:
+        if kw in rl:
+            return "restricted"
+    if relation == "job_seeker":
+        return "safe"
+    sc = sum(1 for p in _SAFE_PAT if p in rl or p in ml)
+    if sc >= 2:
+        return "safe"
+    if len(reply.strip()) < 100 and any(
+        g in rl for g in ("আসসালামু", "ধন্যবাদ", "স্বাগতম", "হ্যাঁ", "জি")
+    ):
+        return "safe"
+    if relation == "client" and sc >= 1:
+        return "safe"
+    if relation == "employee":
+        return "restricted"
+    if relation == "unknown" and sc == 0:
+        return "restricted"
+    return "safe"
+
+
 # ── OCR: extract text from image using Tesseract ───────────
 def _extract_text_from_image(image_bytes: bytes) -> tuple[str, float]:
     """Extract text from image bytes using Tesseract OCR (Bangla + English).
@@ -591,37 +649,78 @@ async def handle_whatsapp_webhook(
                             )
                         conn.commit()
                 else:
-                    # Non-owner: store as draft, notify owner
+                    # Non-owner: safety-classify before send/draft
                     contact_display = msg.get("sender_name") or msg["sender_id"]
-                    with db_conn_fn() as conn:
-                        with conn.cursor() as cur:
-                            cur.execute(
-                                """INSERT INTO fazle_social_messages
-                                   (platform, direction, contact_identifier, content, metadata, status)
-                                   VALUES ('whatsapp', 'outgoing', %s, %s, %s, 'draft')""",
-                                (msg["sender_id"], multimodal_reply,
-                                 psycopg2.extras.Json({
-                                     "source": "ai_draft",
-                                     "media_type": msg_type,
-                                     "customer_name": contact_display,
-                                     "awaiting_approval": True,
-                                 })),
-                            )
-                        conn.commit()
-                    if owner_phone:
-                        owner_notification = (
-                            f"📩 *{contact_display}* sent [{msg_type}]\n\n"
-                            f"🤖 AI suggests:\n{multimodal_reply[:500]}\n\n"
-                            f"✅ Reply *send* to approve"
-                        )
+                    # Fetch contact relation for safety classification
+                    _mm_relation = "unknown"
+                    try:
+                        from main import get_contact
+                        _mm_cd = get_contact(db_conn_fn, msg["sender_id"], "whatsapp")
+                        if _mm_cd:
+                            _mm_relation = (_mm_cd.get("relation") or "unknown").lower()
+                    except Exception:
+                        pass
+                    mm_safety = _classify_reply_safety(
+                        msg.get("caption", "") or f"[{msg_type}]",
+                        multimodal_reply, _mm_relation,
+                    )
+                    if mm_safety == "safe":
                         from whatsapp import send_message
-                        await send_message(
+                        result = await send_message(
                             creds.get("whatsapp_api_url", ""),
                             creds.get("access_token", ""),
                             creds.get("phone_number_id", ""),
-                            owner_phone,
-                            owner_notification,
+                            msg["sender_id"],
+                            multimodal_reply,
                         )
+                        with db_conn_fn() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    """INSERT INTO fazle_social_messages
+                                       (platform, direction, contact_identifier, content, metadata, status)
+                                       VALUES ('whatsapp', 'outgoing', %s, %s, %s, %s)""",
+                                    (msg["sender_id"], multimodal_reply,
+                                     psycopg2.extras.Json({
+                                         "source": "ai_auto",
+                                         "safety": "safe",
+                                         "media_type": msg_type,
+                                         "relation": _mm_relation,
+                                     }),
+                                     "sent" if result.get("sent") else "failed"),
+                                )
+                            conn.commit()
+                        logger.info(f"Auto-sent safe multimodal reply to {msg['sender_id']}")
+                    else:
+                        with db_conn_fn() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    """INSERT INTO fazle_social_messages
+                                       (platform, direction, contact_identifier, content, metadata, status)
+                                       VALUES ('whatsapp', 'outgoing', %s, %s, %s, 'draft')""",
+                                    (msg["sender_id"], multimodal_reply,
+                                     psycopg2.extras.Json({
+                                         "source": "ai_draft",
+                                         "safety": "restricted",
+                                         "media_type": msg_type,
+                                         "customer_name": contact_display,
+                                         "awaiting_approval": True,
+                                     })),
+                                )
+                            conn.commit()
+                        if owner_phone:
+                            owner_notification = (
+                                f"📩 *{contact_display}* sent [{msg_type}]\n\n"
+                                f"🤖 AI suggests:\n{multimodal_reply[:500]}\n\n"
+                                f"✅ Reply *send* to approve"
+                            )
+                            from whatsapp import send_message
+                            await send_message(
+                                creds.get("whatsapp_api_url", ""),
+                                creds.get("access_token", ""),
+                                creds.get("phone_number_id", ""),
+                                owner_phone,
+                                owner_notification,
+                            )
             processed += 1
             continue
 
@@ -906,45 +1005,81 @@ async def handle_whatsapp_webhook(
         except Exception as e:
             logger.debug(f"Reply cache save failed: {e}")
 
-        # Step 3: Store as DRAFT — do NOT send automatically
-        # Notify the owner for confirmation instead
+        # Step 3: Safety-classified routing — auto-send safe replies, draft restricted ones
+        safety = _classify_reply_safety(msg["text"], ai_reply, contact_relation)
         contact_display = msg.get("sender_name") or msg["sender_id"]
-        with db_conn_fn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO fazle_social_messages
-                       (platform, direction, contact_identifier, content, metadata, status)
-                       VALUES ('whatsapp', 'outgoing', %s, %s, %s, 'draft')""",
-                    (msg["sender_id"], ai_reply,
-                     psycopg2.extras.Json({
-                         "source": "ai_draft",
-                         "customer_message": msg["text"][:500],
-                         "customer_name": contact_display,
-                         "awaiting_approval": True,
-                     })),
-                )
-            conn.commit()
 
-        # Notify owner about the pending draft
-        if owner_phone:
-            owner_notification = (
-                f"📩 *{contact_display}* ({msg['sender_id']}):\n"
-                f"{msg['text'][:300]}\n\n"
-                f"🤖 AI suggests:\n{ai_reply[:500]}\n\n"
-                f"✅ Reply *send* to approve\n"
-                f"✏️ Or type your own reply"
-            )
+        if safety == "safe":
+            # AUTO-SEND: reply is safe (job inquiry, greeting, service info, etc.)
             creds = get_creds_fn("whatsapp")
+            send_status = "failed"
             if creds:
                 from whatsapp import send_message
-                await send_message(
+                result = await send_message(
                     creds.get("whatsapp_api_url", ""),
                     creds.get("access_token", ""),
                     creds.get("phone_number_id", ""),
-                    owner_phone,
-                    owner_notification,
+                    msg["sender_id"],
+                    ai_reply,
                 )
-                logger.info(f"Draft notification sent to owner for {msg['sender_id']}")
+                send_status = "sent" if result.get("sent") else "failed"
+            with db_conn_fn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO fazle_social_messages
+                           (platform, direction, contact_identifier, content, metadata, status)
+                           VALUES ('whatsapp', 'outgoing', %s, %s, %s, %s)""",
+                        (msg["sender_id"], ai_reply,
+                         psycopg2.extras.Json({
+                             "source": "ai_auto",
+                             "safety": "safe",
+                             "relation": contact_relation,
+                             "customer_message": msg["text"][:500],
+                         }),
+                         send_status),
+                    )
+                conn.commit()
+            logger.info(f"Auto-sent safe reply to {msg['sender_id']} ({contact_relation})")
+        else:
+            # DRAFT: reply contains restricted content — needs owner approval
+            with db_conn_fn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO fazle_social_messages
+                           (platform, direction, contact_identifier, content, metadata, status)
+                           VALUES ('whatsapp', 'outgoing', %s, %s, %s, 'draft')""",
+                        (msg["sender_id"], ai_reply,
+                         psycopg2.extras.Json({
+                             "source": "ai_draft",
+                             "safety": "restricted",
+                             "relation": contact_relation,
+                             "customer_message": msg["text"][:500],
+                             "customer_name": contact_display,
+                             "awaiting_approval": True,
+                         })),
+                    )
+                conn.commit()
+
+            # Notify owner about the pending draft
+            if owner_phone:
+                owner_notification = (
+                    f"📩 *{contact_display}* ({msg['sender_id']}):\n"
+                    f"{msg['text'][:300]}\n\n"
+                    f"🤖 AI suggests:\n{ai_reply[:500]}\n\n"
+                    f"✅ Reply *send* to approve\n"
+                    f"✏️ Or type your own reply"
+                )
+                creds = get_creds_fn("whatsapp")
+                if creds:
+                    from whatsapp import send_message
+                    await send_message(
+                        creds.get("whatsapp_api_url", ""),
+                        creds.get("access_token", ""),
+                        creds.get("phone_number_id", ""),
+                        owner_phone,
+                        owner_notification,
+                    )
+                    logger.info(f"Draft notification sent to owner for {msg['sender_id']}")
 
         try:
             _auto_update_interest(db_conn_fn, msg["sender_id"], "whatsapp", msg["text"])

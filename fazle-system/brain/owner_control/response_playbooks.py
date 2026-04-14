@@ -371,3 +371,102 @@ def build_playbook_prompt(role: str) -> str:
         f"\nRESTRICTED TOPICS (NEVER discuss): {', '.join(playbook.restricted_topics)}\n"
         f"━━━ END PLAYBOOK ━━━"
     )
+
+
+# ── Reply Safety Classifier ─────────────────────────────────
+
+# Keywords that indicate the AI reply contains restricted/sensitive content
+_RESTRICTED_KEYWORDS = (
+    # Financial
+    "টাকা পেয়েছ", "বেতন দিয়েছ", "advance", "payment details",
+    "হিসাব", "ব্যালেন্স", "profit", "loss", "revenue", "expense",
+    "লাভ", "ক্ষতি", "আয়", "ব্যয়",
+    # Vessel / operational secrets
+    "vessel name", "ship name", "জাহাজের নাম", "route details",
+    "cargo details", "consignment", "lc number", "bl number",
+    # Employee private data
+    "employee salary", "কর্মীর বেতন", "nid number", "passport",
+    "bank account", "ব্যাংক একাউন্ট",
+    # Owner personal
+    "owner personal", "বসের ব্যক্তিগত",
+)
+
+# Patterns that indicate the reply is safe to auto-send
+_SAFE_PATTERNS = (
+    # Job inquiry responses (from Auto_reply_sample.txt)
+    "survey scout", "সার্ভে স্কট", "সিকিউরিটি গার্ড",
+    "চাকরি", "job", "vacancy", "পদ", "নিয়োগ",
+    "আবেদন", "application", "apply",
+    "যোগ্যতা", "qualification", "experience", "অভিজ্ঞতা",
+    "প্রশিক্ষণ", "training",
+    "অফিসে আসুন", "অফিসে এসে",
+    "cv পাঠান", "cv নিয়ে",
+    # Salary ranges (public info, not private)
+    "১২,০০০", "১৫,০০০", "১৮,০০০", "12,000", "15,000", "18,000",
+    # Greetings / pleasantries
+    "আসসালামু আলাইকুম", "ওয়ালাইকুম", "ধন্যবাদ", "স্বাগতম",
+    "কিভাবে সাহায্য", "how can i help",
+    # Office info (public)
+    "ভিক্টোরিয়া গেইট", "পাহাড়তলী", "চট্টগ্রাম",
+    "01958", "office",
+    # Service inquiries
+    "সিকিউরিটি সার্ভিস", "security service", "manpower",
+    "guard", "গার্ড",
+    # Complaints / general
+    "অভিযোগ", "complaint", "সমস্যা",
+    "বুঝতে পারছি না", "আবার বলুন",
+)
+
+
+def classify_reply_safety(message: str, reply: str, relation: str = "unknown") -> str:
+    """Classify whether an AI-generated reply is safe to auto-send.
+
+    Returns:
+        "safe"       — reply can be sent automatically
+        "restricted" — reply must be stored as draft for owner approval
+    """
+    reply_lower = reply.lower()
+    msg_lower = message.lower()
+
+    # Priority 1: Owner/family always gets auto-reply
+    if relation in ("owner", "family"):
+        return "safe"
+
+    # Priority 2: Check for restricted content in the reply
+    for kw in _RESTRICTED_KEYWORDS:
+        if kw in reply_lower:
+            logger.info(f"Reply classified RESTRICTED — matched '{kw}'")
+            return "restricted"
+
+    # Priority 3: Job seekers with safe content → auto-send
+    if relation == "job_seeker":
+        return "safe"
+
+    # Priority 4: Known safe patterns in reply or message
+    safe_score = 0
+    for pat in _SAFE_PATTERNS:
+        if pat in reply_lower or pat in msg_lower:
+            safe_score += 1
+    if safe_score >= 2:
+        return "safe"
+
+    # Priority 5: Short greetings / acknowledgments → safe
+    if len(reply.strip()) < 100 and any(
+        g in reply_lower for g in ("আসসালামু", "ধন্যবাদ", "স্বাগতম", "হ্যাঁ", "জি")
+    ):
+        return "safe"
+
+    # Priority 6: Clients with safe content → safe
+    if relation == "client" and safe_score >= 1:
+        return "safe"
+
+    # Priority 7: Employee messages → draft (sensitive context)
+    if relation == "employee":
+        return "restricted"
+
+    # Priority 8: Unknown contacts with no safe signals → draft
+    if relation == "unknown" and safe_score == 0:
+        return "restricted"
+
+    # Default: safe (most general inquiries)
+    return "safe"
