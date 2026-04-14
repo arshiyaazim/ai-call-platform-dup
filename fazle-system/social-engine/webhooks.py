@@ -4,6 +4,7 @@
 # Owner conversational control + training data capture
 # ============================================================
 import logging
+import os
 import random
 import re
 import time
@@ -619,6 +620,50 @@ async def handle_whatsapp_webhook(
                     sender_id=msg["sender_id"],
                 )
 
+            # ── OPS-CORE HOOK FOR OWNER: intercept structured ops messages before brain ──
+            ops_core_url = os.environ.get("SOCIAL_OPS_CORE_URL", "")
+            if ops_core_url and has_text:
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        ops_resp = await client.post(
+                            f"{ops_core_url}/ops/whatsapp/process",
+                            json={
+                                "sender_id": msg["sender_id"],
+                                "text": msg["text"],
+                                "message_id": msg_id,
+                                "contact_name": msg.get("sender_name", ""),
+                            },
+                        )
+                        if ops_resp.status_code == 200:
+                            ops_data = ops_resp.json()
+                            if ops_data.get("handled") and ops_data.get("reply"):
+                                logger.info(f"Ops-core handled owner [{ops_data.get('intent')}] for {msg['sender_id']}")
+                                creds = get_creds_fn("whatsapp")
+                                if creds:
+                                    from whatsapp import send_message
+                                    result = await send_message(
+                                        creds.get("whatsapp_api_url", ""),
+                                        creds.get("access_token", ""),
+                                        creds.get("phone_number_id", ""),
+                                        msg["sender_id"],
+                                        ops_data["reply"],
+                                    )
+                                    with db_conn_fn() as conn:
+                                        with conn.cursor() as cur:
+                                            cur.execute(
+                                                """INSERT INTO fazle_social_messages
+                                                   (platform, direction, contact_identifier, content, metadata, status)
+                                                   VALUES ('whatsapp', 'outgoing', %s, %s, %s, %s)""",
+                                                (msg["sender_id"], ops_data["reply"],
+                                                 psycopg2.extras.Json({"source": "ops-core", "intent": ops_data.get("intent"), "is_owner": True}),
+                                                 "sent" if result.get("sent") else "failed"),
+                                            )
+                                        conn.commit()
+                                processed += 1
+                                continue
+                except Exception as e:
+                    logger.warning(f"Ops-core call for owner failed (falling through to brain): {e}")
+
             # Route to /chat/owner for conversational control
             owner_reply = await _call_brain_owner(
                 brain_url, msg["text"], "whatsapp", msg["sender_id"]
@@ -661,6 +706,50 @@ async def handle_whatsapp_webhook(
             contact_data = get_contact(db_conn_fn, msg["sender_id"], "whatsapp")
         except Exception as e:
             logger.warning(f"Contact upsert/fetch failed: {e}")
+
+        # ── OPS-CORE HOOK: intercept structured ops messages before brain ──
+        ops_core_url = os.environ.get("SOCIAL_OPS_CORE_URL", "")
+        if ops_core_url and has_text:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    ops_resp = await client.post(
+                        f"{ops_core_url}/ops/whatsapp/process",
+                        json={
+                            "sender_id": msg["sender_id"],
+                            "text": msg["text"],
+                            "message_id": msg_id,
+                            "contact_name": msg.get("sender_name", ""),
+                        },
+                    )
+                    if ops_resp.status_code == 200:
+                        ops_data = ops_resp.json()
+                        if ops_data.get("handled") and ops_data.get("reply"):
+                            logger.info(f"Ops-core handled [{ops_data.get('intent')}] for {msg['sender_id']}")
+                            creds = get_creds_fn("whatsapp")
+                            if creds:
+                                from whatsapp import send_message
+                                result = await send_message(
+                                    creds.get("whatsapp_api_url", ""),
+                                    creds.get("access_token", ""),
+                                    creds.get("phone_number_id", ""),
+                                    msg["sender_id"],
+                                    ops_data["reply"],
+                                )
+                                with db_conn_fn() as conn:
+                                    with conn.cursor() as cur:
+                                        cur.execute(
+                                            """INSERT INTO fazle_social_messages
+                                               (platform, direction, contact_identifier, content, metadata, status)
+                                               VALUES ('whatsapp', 'outgoing', %s, %s, %s, %s)""",
+                                            (msg["sender_id"], ops_data["reply"],
+                                             psycopg2.extras.Json({"source": "ops-core", "intent": ops_data.get("intent")}),
+                                             "sent" if result.get("sent") else "failed"),
+                                        )
+                                    conn.commit()
+                            processed += 1
+                            continue
+            except Exception as e:
+                logger.warning(f"Ops-core call failed (falling through to brain): {e}")
 
         # Determine if this is a priority contact (VIP/client get faster processing)
         is_priority = False

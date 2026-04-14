@@ -28,6 +28,12 @@ import {
   MessageCircle,
   BookUser,
   Database,
+  Ship,
+  Search,
+  MessageSquare,
+  DollarSign,
+  Wallet,
+  Bell,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useSidebarStore } from '@/store/sidebar';
@@ -55,6 +61,12 @@ const navItems = [
   { href: '/dashboard/fazle/privacy', label: 'Privacy', icon: ShieldCheck },
   { href: '/dashboard/fazle/gdpr-admin', label: 'GDPR Admin', icon: Shield },
   { href: '/dashboard/fazle/database-maintenance', label: 'DB Maintenance', icon: Database },
+  { href: '/dashboard/fazle/ops', label: 'Ops Dashboard', icon: Ship },
+  { href: '/dashboard/fazle/ops/chat', label: 'Ops Chat', icon: MessageSquare },
+  { href: '/dashboard/fazle/ops/search', label: 'Ops Search', icon: Search },
+  { href: '/dashboard/fazle/ops/billing', label: 'Ops Billing', icon: DollarSign },
+  { href: '/dashboard/fazle/ops/salary', label: 'Ops Salary', icon: Wallet },
+  { href: '/dashboard/fazle/ops/alerts', label: 'Ops Alerts', icon: Bell },
   { href: '/dashboard/fazle/logs', label: 'Logs', icon: ScrollText },
   { href: '/dashboard/fazle/settings', label: 'Settings', icon: Settings },
 ];

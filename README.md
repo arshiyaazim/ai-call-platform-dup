@@ -299,6 +299,8 @@ All Fazle services — core intelligence, Phase-5 autonomous services, and suppo
 | fazle-workflow-engine | 9700 | Multi-step workflow automation |
 | fazle-social-engine | 9800 | WhatsApp/Facebook — intent detection, contact intelligence |
 | fazle-learning-engine | 8900 | Self-improvement — conversation analysis, knowledge extraction |
+| **Business Operations** | | |
+| ops-core-service | 9850 | Lightweight ops backend — employee/program/payment CRUD, CSV import, role-based access |
 | **Observability** | | |
 | fazle-otel-collector | 4317-4318 | OpenTelemetry collector — distributed tracing |
 
@@ -396,6 +398,7 @@ Layer 4  LLM Gateway (fazle-llm-gateway :8800)
            │
 Layer 5  Extended Services
            ├── Social Engine (:9800) — WhatsApp/FB platform routing
+           ├── Ops-Core Service (:9850) — employee/program/payment CRUD
            ├── Workflow Engine (:9700) — multi-step automation
            ├── Guardrail Engine (:9600) — content safety
            ├── Learning Engine (:8900) — conversation analysis
@@ -599,6 +602,22 @@ Nginx runs on the host (not Docker), with configs at `/etc/nginx/sites-available
 | `fazle_web_intelligence_cache` | Fazle | Cached web search results & summaries |
 | `llm_conversation_log` | Gateway | Every LLM request/response — provider, model, latency, fallback flag, trainable flag |
 | `telephony_events` | Telephony Webhook | Inbound call log — CallSid (unique), workflow_id, from/to, payload, status, retry_count, locked_at |
+
+### Ops Tables (ops-core-service)
+
+| Table | Purpose |
+|-------|---------|
+| `ops_employees` | Employee registry — name, role, phone, status, hire date |
+| `ops_programs` | Security programs / client sites — name, location, rates, employee count |
+| `ops_program_history` | Audit trail of program changes |
+| `ops_payments` | Employee payment records — amount, method (Bkash/Nagad), payment date, status |
+| `ops_attendance` | Daily attendance tracking per employee per program |
+| `ops_notes` | Free-text notes linked to employees / programs |
+| `ops_users` | Dashboard user accounts with role-based access (admin/manager/viewer) |
+| `ops_pending_actions` | Queued WhatsApp-originated actions awaiting approval |
+| `ops_rates` | Service rate definitions per program |
+
+**Data imported:** 1,242 payment records (Feb–Apr 2026) covering 112 employees, ৳1,067,039 total.
 
 ### Vector Storage
 
@@ -976,6 +995,7 @@ bash scripts/health-check.sh
 | Fazle Trainer    | 1    | 512 MB | 128 MB   | Active |
 | Fazle Voice      | 1    | 512 MB | 128 MB   | **Disabled** |
 | Fazle UI         | 0.5  | 256 MB | 128 MB   | Active |
+| Ops-Core Service | 0.5  | 256 MB | 64 MB    | Active |
 | LLM Gateway      | 1    | 1 GB   | 256 MB   | Active |
 | Learning Engine  | 0.5  | 512 MB | 128 MB   | Active |
 | Queue            | 0.5  | 512 MB | 128 MB   | Active |
@@ -1101,13 +1121,14 @@ docker exec ai-postgres psql -U postgres -d postgres \
 | Phase 6 | Ollama-first LLM gateway — caching, fallback, DB logging, training data export | Deployed (2026-04-10) |
 | Phase 7 | Telephony webhook hardening — Nginx-first routing, header re-injection proxy, idempotent event store, retry & dead-letter | Deployed (2026-04-13) |
 | Phase 8.1 | **WhatsApp-first business pivot** — Disabled voice stack (Dograh, LiveKit, Coturn, telephony-webhook, ai-agent-service, fazle-voice) via Docker profiles. Freed ~3.8 GB RAM. Focus on WhatsApp automation, recruitment, client/employee management, role-based DB updates | Deployed (2026-04-14) |
+| Phase 8.2 | **Ops-core service** — Node.js Fastify backend (port 9850) for Al-Aqsa Security Service business operations. 9 PostgreSQL tables, 4 migrations, employee/program/payment CRUD, CSV payment import (1,242 rows Feb–Apr 2026), role-based access, WhatsApp intent integration via social-engine | Deployed (2026-04-15) |
 
 ### Planned
 
-- **WhatsApp role-based commands** — User roles (admin, manager, employee) control which database operations are allowed via WhatsApp messages
+- **WhatsApp role-based commands** — User roles (admin, manager, employee) control which database operations are allowed via WhatsApp messages (ops-core + social-engine integration in progress)
 - **Recruitment AI pipeline** — Automated candidate screening, interview scheduling, and follow-up via WhatsApp
-- **Client management automation** — Automated client onboarding, payment tracking, and program enrollment via WhatsApp
-- **Employee management** — Shift scheduling, task assignment, and performance tracking via WhatsApp commands
+- **Client management automation** — Automated client onboarding and program enrollment via WhatsApp (payment tracking live via ops-core)
+- **Employee management** — Shift scheduling, task assignment, and performance tracking via WhatsApp commands (employee registry live via ops-core)
 - **Single gateway architecture** — Remove brain's parallel fan-out, route ALL LLM calls through gateway only
 - **Embedding migration** — Switch memory service to Ollama `nomic-embed-text` primary, OpenAI fallback
 - **Ollama fine-tuning** — Train on collected OpenAI fallback responses from `llm_conversation_log`
