@@ -9,6 +9,7 @@ from typing import AsyncIterator
 import httpx
 
 from .base import BaseAgent, AgentContext, AgentResult
+from persona_engine import _get_governance_prompt
 
 logger = logging.getLogger("fazle-agents.conversation")
 
@@ -101,10 +102,16 @@ class ConversationAgent(BaseAgent):
             memory_lines = [f"- {m.get('text', '')}" for m in ctx.memories[:3]]
             memory_context = "\n\nRelevant memories:\n" + "\n".join(memory_lines)
 
+        # Inject governance canonical facts (cached in Redis, ~1ms)
+        gov_context = ""
+        gov_prompt = _get_governance_prompt()
+        if gov_prompt:
+            gov_context = "\n" + gov_prompt
+
         return (
             f"You are Azim's personal AI assistant speaking to {ctx.user_name}. "
             "Respond naturally in 1-3 sentences. Be concise, warm, and direct. "
-            f"Plain text only.{memory_context}"
+            f"Plain text only.{gov_context}{memory_context}"
         )
 
     def _build_messages(self, ctx: AgentContext) -> list[dict]:

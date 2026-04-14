@@ -6,6 +6,7 @@ import logging
 import httpx
 from .base import BaseAgent, AgentContext, AgentResult
 from .identity_core import IdentityProfile
+from persona_engine import _get_governance_prompt
 
 logger = logging.getLogger("fazle-agents.social")
 
@@ -59,6 +60,11 @@ class SocialAgent(BaseAgent):
             # Skip identity_prompt prepend — BASE_IDENTITY in persona_engine covers it.
             # Saves ~460 chars (~150 tokens, ~6s on CPU).
             full_prompt = system_prompt
+
+            # Inject governance canonical facts (cached in Redis, ~1ms)
+            gov_prompt = _get_governance_prompt()
+            if gov_prompt:
+                full_prompt = full_prompt + "\n" + gov_prompt
 
             # Enrich context
             ctx.metadata["social_intent"] = intent
