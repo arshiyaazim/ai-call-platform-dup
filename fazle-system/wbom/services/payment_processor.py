@@ -5,16 +5,20 @@
 import logging
 import re
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from difflib import SequenceMatcher
 from typing import Optional
 
 from database import (
     get_conn, get_row, insert_row, update_row, update_row_no_ts,
-    list_rows, search_rows, execute_query,
+    list_rows, search_rows, execute_query, find_row_exact,
 )
 import psycopg2.extras
 
 logger = logging.getLogger("wbom.payment_processor")
+
+# Minimum name match ratio to accept a payment without admin review
+NAME_MATCH_THRESHOLD = 0.80
 
 # Payment method abbreviation mapping
 PAYMENT_METHOD_MAP = {
@@ -64,10 +68,26 @@ class PaymentProcessor:
         method_abbr = self._get_field(extracted, "payment_method")
         emp_name = self._get_field(extracted, "employee_name")
 
-        # Step 2: Find employee by mobile
+        # Step 2: Find employee by mobile (exact match first)
         employee = None
         if mobile:
             employee = self.find_employee_by_mobile(mobile)
+
+        # Step 2b: Name-match validation
+        name_match_ok = True
+        name_match_ratio = 0.0
+        if employee and emp_name:
+            name_match_ratio = SequenceMatcher(
+                None,
+                emp_name.lower().strip(),
+                employee["employee_name"].lower().strip(),
+            ).ratio()
+            if name_match_ratio < NAME_MATCH_THRESHOLD:
+                name_match_ok = False
+                logger.warning(
+                    "Name mismatch: extracted '%s' vs DB '%s' (ratio=%.2f) for mobile %s",
+                    emp_name, employee["employee_name"], name_match_ratio, mobile,
+                )
 
         # Determine transaction type from context
         transaction_type = self.determine_transaction_type(message_body)
@@ -75,12 +95,20 @@ class PaymentProcessor:
         # Expand payment method abbreviation
         payment_method = PAYMENT_METHOD_MAP.get(method_abbr, "Cash")
 
-        # Parse amount
-        amount = Decimal(amount_str) if amount_str and amount_str.isdigit() else None
+        # Parse & validate amount
+        amount = None
+        if amount_str:
+            try:
+                amount = Decimal(amount_str)
+                if amount <= 0 or amount > 100000:
+                    logger.warning("Amount out of range: %s (message_id=%s)", amount, message_id)
+                    amount = None
+            except (InvalidOperation, ValueError):
+                logger.warning("Invalid amount '%s' (message_id=%s)", amount_str, message_id)
 
-        # Step 3: Record transaction (if we have enough data)
+        # Step 3: Record transaction (if we have enough data AND name validated)
         transaction = None
-        if employee and amount:
+        if employee and amount and name_match_ok:
             transaction = self.record_cash_transaction(
                 employee_id=employee["employee_id"],
                 amount=amount,
@@ -94,7 +122,7 @@ class PaymentProcessor:
             if transaction_type in ("Salary", "Advance"):
                 self._try_complete_program(employee["employee_id"])
 
-        # Build missing fields list
+        # Build missing/rejected fields list
         missing = []
         if not employee:
             missing.append("employee (mobile not found)")
@@ -102,6 +130,15 @@ class PaymentProcessor:
             missing.append("amount")
         if not method_abbr:
             missing.append("payment_method")
+        if not name_match_ok:
+            missing.append(f"name_mismatch (extracted='{emp_name}', db='{employee['employee_name']}', ratio={name_match_ratio:.2f})")
+
+        # Audit log rejected/incomplete payments
+        if missing:
+            logger.warning(
+                "Payment requires admin review (message_id=%s): %s",
+                message_id, ", ".join(missing),
+            )
 
         return {
             "message_id": message_id,
@@ -112,27 +149,31 @@ class PaymentProcessor:
             "transaction_type": transaction_type,
             "payment_method": payment_method,
             "amount": str(amount) if amount else None,
+            "name_match_ratio": name_match_ratio,
             "requires_admin_input": bool(missing),
             "missing_fields": missing,
         }
 
     def find_employee_by_mobile(self, mobile: str) -> Optional[dict]:
-        """Find employee by mobile number.
+        """Find employee by mobile number (exact match).
 
         Handles leading zero preservation.
         """
-        # Direct match
-        rows = search_rows("wbom_employees", "employee_mobile", mobile, 1)
-        if rows:
-            return rows[0]
+        # Normalize: strip spaces/dashes
+        mobile = mobile.replace("-", "").replace(" ", "").strip()
+
+        # Exact match first
+        row = find_row_exact("wbom_employees", "employee_mobile", mobile)
+        if row:
+            return row
 
         # Try with/without leading zero
         if mobile.startswith("0"):
             alt = mobile[1:]
         else:
             alt = "0" + mobile
-        rows = search_rows("wbom_employees", "employee_mobile", alt, 1)
-        return rows[0] if rows else None
+        row = find_row_exact("wbom_employees", "employee_mobile", alt)
+        return row
 
     def determine_transaction_type(self, message_body: str) -> str:
         """Determine transaction type from message context.

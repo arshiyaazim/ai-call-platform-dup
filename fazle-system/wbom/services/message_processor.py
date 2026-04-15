@@ -73,9 +73,25 @@ def classify_message(message_text: str) -> tuple[str, float]:
         scores[msg_type] = score
 
     if max(scores.values(), default=0) > 0:
-        classification = max(scores, key=scores.get)
-        confidence = min(scores[classification] / 100, 1.0)
-        return classification, confidence
+        # Sort by score descending for tie-breaking (first defined type wins)
+        sorted_types = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        best_type, best_score = sorted_types[0]
+
+        # Check for tie — if top two scores are equal, fall to "general"
+        if len(sorted_types) > 1 and sorted_types[1][1] == best_score:
+            logger.warning(
+                "Ambiguous classification: %s and %s tied at %d",
+                sorted_types[0][0], sorted_types[1][0], best_score,
+            )
+            return "general", 0.5
+
+        confidence = min(best_score / 100, 1.0)
+
+        # Reject low-confidence classifications
+        if confidence < 0.3:
+            return "general", confidence
+
+        return best_type, confidence
 
     return "general", 0.5
 

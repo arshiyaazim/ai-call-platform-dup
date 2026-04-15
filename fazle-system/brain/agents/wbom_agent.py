@@ -59,8 +59,8 @@ class WBOMAgent(BaseAgent):
                 # Search across WBOM data for context
                 try:
                     resp = await client.get(
-                        f"{self.wbom_url}/api/wbom/search",
-                        params={"q": ctx.message[:200], "limit": 5},
+                        f"{self.wbom_url}/api/subagent/wbom/search",
+                        params={"search_type": "programs", "query": ctx.message[:200], "limit": 5},
                     )
                     if resp.status_code == 200:
                         search = resp.json()
@@ -73,8 +73,8 @@ class WBOMAgent(BaseAgent):
                 if "message" in msg_lower or "whatsapp" in msg_lower:
                     try:
                         resp = await client.get(
-                            f"{self.wbom_url}/api/wbom/messages",
-                            params={"limit": 5},
+                            f"{self.wbom_url}/api/subagent/wbom/search",
+                            params={"search_type": "contacts", "query": ctx.message[:200], "limit": 5},
                         )
                         if resp.status_code == 200:
                             wbom_data["recent_messages"] = resp.json()[:5]

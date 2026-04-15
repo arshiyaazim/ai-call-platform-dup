@@ -18,7 +18,7 @@ VALIDATION_RULES = {
     },
     "vessel_name": {
         "max_length": 100,
-        "allowed_chars": r"^[A-Za-z0-9\s\.\-]+$",
+        "allowed_chars": r"^[A-Za-z0-9\u0980-\u09FF\s\.\-]+$",
         "error_message": "Vessel name contains invalid characters",
     },
     "amount": {
@@ -37,7 +37,7 @@ VALIDATION_RULES = {
     "employee_name": {
         "min_length": 2,
         "max_length": 100,
-        "regex": r"^[A-Za-z\s\.]+$",
+        "regex": r"^[A-Za-z\u0980-\u09FF\s\.\-']+$",
         "error_message": "Employee name must contain only letters",
     },
 }
@@ -113,9 +113,14 @@ def validate_field(
 
     # ── Date validation ───────────────────────────────────────
     if field_name == "date":
-        try:
-            parsed = datetime.strptime(value, rules["format"])
-        except ValueError:
+        parsed = None
+        for fmt in ("%d.%m.%Y", "%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d"):
+            try:
+                parsed = datetime.strptime(value, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed is None:
             return False, value, rules["error_message"]
         min_dt = datetime.strptime(rules["min_date"], "%Y-%m-%d")
         max_dt = datetime.now() + timedelta(days=rules["max_date_offset_days"])

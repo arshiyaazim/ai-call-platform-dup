@@ -164,6 +164,16 @@ def search_rows(table: str, search_col: str, search_val: str, limit: int = 20) -
     return [dict(r) for r in rows]
 
 
+def find_row_exact(table: str, col: str, val: str) -> Optional[dict]:
+    """Find a single row by exact column value (case-sensitive)."""
+    sql = f"SELECT * FROM {table} WHERE {col} = %s LIMIT 1"
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, (val,))
+            row = cur.fetchone()
+    return dict(row) if row else None
+
+
 def execute_query(sql: str, params: tuple = ()) -> list[dict]:
     """Execute a raw query and return results."""
     with get_conn() as conn:

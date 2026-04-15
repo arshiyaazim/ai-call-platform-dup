@@ -139,15 +139,37 @@ class EscortOrderProcessor:
         employee_id = None
         mobile = fields.get("mobile_number")
         if mobile:
+            mobile = self._normalize_mobile(mobile)
             employee_id = self._get_or_create_employee(mobile)
 
         # Determine shift using config thresholds
         now = datetime.now()
         shift = self._cfg.get_shift(now.hour)
 
+        mother_vessel = fields.get("mother_vessel", "").strip()
+        lighter_vessel = fields.get("lighter_vessel", "").strip()
+
+        # Reject empty/unknown vessel names
+        missing_vessels = []
+        if not mother_vessel or mother_vessel.lower() == "unknown":
+            missing_vessels.append("mother_vessel")
+        if not lighter_vessel or lighter_vessel.lower() == "unknown":
+            missing_vessels.append("lighter_vessel")
+
+        if missing_vessels:
+            logger.warning(
+                "Escort program missing vessel names: %s (message_id=%s)",
+                missing_vessels, message_id,
+            )
+            return {
+                "requires_admin_input": True,
+                "missing_fields": missing_vessels,
+                "message_id": message_id,
+            }
+
         program_data = {
-            "mother_vessel": fields.get("mother_vessel", "Unknown"),
-            "lighter_vessel": fields.get("lighter_vessel", "Unknown"),
+            "mother_vessel": mother_vessel,
+            "lighter_vessel": lighter_vessel,
             "master_mobile": mobile or "",
             "destination": fields.get("destination"),
             "escort_employee_id": employee_id,
@@ -250,7 +272,9 @@ class EscortOrderProcessor:
         All programs share the same mother_vessel and contact_id.
         Returns list of saved program dicts.
         """
-        mother_vessel = multi_data.get("mother_vessel", {}).get("value", "Unknown")
+        mother_vessel = multi_data.get("mother_vessel", {}).get("value", "")
+        if not mother_vessel or mother_vessel.lower() == "unknown":
+            return []  # Cannot save without mother vessel
         program_date = multi_data.get("date", {}).get("value", date.today().isoformat())
 
         now = datetime.now()
@@ -267,16 +291,24 @@ class EscortOrderProcessor:
             if overrides.get("mobile_number"):
                 mobile = overrides["mobile_number"]
 
+            if mobile:
+                mobile = self._normalize_mobile(mobile)
+
             employee_id = None
             if mobile:
                 employee_id = self._get_or_create_employee(mobile)
 
+            lighter_vessel = overrides.get(
+                "lighter_vessel",
+                lighter.get("lighter_vessel", {}).get("value", ""),
+            )
+            if not lighter_vessel or lighter_vessel.lower() == "unknown":
+                logger.warning("Skipping lighter #%d — no vessel name", idx + 1)
+                continue
+
             program_data = {
                 "mother_vessel": mother_vessel,
-                "lighter_vessel": overrides.get(
-                    "lighter_vessel",
-                    lighter.get("lighter_vessel", {}).get("value", "Unknown"),
-                ),
+                "lighter_vessel": lighter_vessel,
                 "master_mobile": mobile or "",
                 "destination": overrides.get(
                     "destination",
@@ -302,18 +334,36 @@ class EscortOrderProcessor:
 
     # ── Helper ────────────────────────────────────────────────
 
-    def _get_or_create_employee(self, mobile: str) -> int:
-        """Find employee by mobile, or create a stub record."""
-        rows = search_rows("wbom_employees", "employee_mobile", mobile, 1)
-        if rows:
-            return rows[0]["employee_id"]
+    def _get_or_create_employee(self, mobile: str) -> Optional[int]:
+        """Find employee by mobile. Returns None if not found (no auto-creation)."""
+        # Normalize mobile
+        mobile = self._normalize_mobile(mobile)
+        if not mobile:
+            return None
 
-        new_emp = insert_row("wbom_employees", {
-            "employee_mobile": mobile,
-            "employee_name": f"Escort-{mobile[-4:]}",
-            "designation": "Escort",
-            "status": "Active",
-        })
-        logger.info("Created stub employee %s for mobile %s",
-                     new_emp["employee_id"], mobile)
-        return new_emp["employee_id"]
+        from database import find_row_exact
+        row = find_row_exact("wbom_employees", "employee_mobile", mobile)
+        if row:
+            return row["employee_id"]
+
+        # Try with/without leading zero
+        if mobile.startswith("0"):
+            alt = mobile[1:]
+        else:
+            alt = "0" + mobile
+        row = find_row_exact("wbom_employees", "employee_mobile", alt)
+        if row:
+            return row["employee_id"]
+
+        logger.warning("Employee not found for mobile %s — will NOT auto-create", mobile)
+        return None
+
+    @staticmethod
+    def _normalize_mobile(mobile: str) -> str:
+        """Normalize mobile number to 11-digit format starting with 0."""
+        if not mobile:
+            return ""
+        mobile = mobile.replace("-", "").replace(" ", "").replace("+880", "0").strip()
+        if not mobile.startswith("0") and len(mobile) == 10:
+            mobile = "0" + mobile
+        return mobile

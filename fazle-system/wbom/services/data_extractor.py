@@ -15,16 +15,16 @@ logger = logging.getLogger("wbom.data_extractor")
 
 EXTRACTION_PATTERNS = {
     "mother_vessel": [
-        r"(?i)m\.?v\.?\s*([a-z0-9\s\-\.]+?)(?=\s*(?:/|lighter|capacity|cap|mob|\n|dest|a/c))",
-        r"(?i)(?:mother\s*vessel|m\s*v)[:\s]*([a-z0-9\s\-\.]+?)(?=\s*lighter|\n)",
+        r"(?i)m\.?v\.?\s*([a-zA-Z0-9\u0980-\u09FF\s\-\.]+?)(?=\s*(?:/|lighter|capacity|cap|mob|\n|dest|a/c))",
+        r"(?i)(?:mother\s*vessel|m\s*v|এমভি)[:\s]*([a-zA-Z0-9\u0980-\u09FF\s\-\.]+?)(?=\s*lighter|\n)",
     ],
     "lighter_vessel": [
-        r"(?i)(?:lighter[:\s]*|mv[:\.\s]+)([a-z0-9\s\-\.]+?)(?=\s*(?:cap|capacity|mob|dest|\d{10,}|m\.?t))",
-        r"(?i)\d+[.)]\s*(?:mv\s*)?([a-z0-9\s\-\.]+?)(?=\s*(?:cap|mob|dest|\d{10,}))",
+        r"(?i)(?:lighter[:\s]*|mv[:\.\s]+)([a-zA-Z0-9\u0980-\u09FF\s\-\.]+?)(?=\s*(?:cap|capacity|mob|dest|\d{10,}|m\.?t))",
+        r"(?i)\d+[.)]\s*(?:mv\s*)?([a-zA-Z0-9\u0980-\u09FF\s\-\.]+?)(?=\s*(?:cap|mob|dest|\d{10,}|m\.?t))",
     ],
     "mobile_number": [
         r"\b(0\d{10})\b",
-        r"\+880(\d{10})\b",
+        r"\+880(0?\d{10})\b",
         r"(?:mob|mobile|m\s*no)[:\s]*(0\d{10})",
     ],
     "destination": [
@@ -72,17 +72,22 @@ def extract_data_from_message(message_text: str, field_name: str) -> tuple[Optio
                 value = match if isinstance(match, str) else (match[0] if match[0] else match[1])
                 value = value.strip()
 
-                # Preserve leading zeros for mobile numbers
+                # Normalize mobile numbers to 11-digit format
                 if field_name == "mobile_number":
+                    value = value.replace("-", "").replace(" ", "").replace("+880", "0")
                     if not value.startswith("0") and len(value) == 10:
                         value = "0" + value
+                    # Validate: must be exactly 11 digits starting with 0
+                    if not re.match(r"^0\d{10}$", value):
+                        continue
 
                 results.append(value)
 
     if results:
-        # Return most common result with confidence based on pattern priority
+        # Return most common result; confidence = fraction of patterns that matched
         most_common = max(set(results), key=results.count)
-        confidence = min(results.count(most_common) / len(patterns), 1.0)
+        matches_count = results.count(most_common)
+        confidence = min(matches_count / max(len(patterns), 1), 1.0)
         return most_common, confidence
 
     return None, 0.0
@@ -146,8 +151,8 @@ _MULTI_LIGHTER_SPLIT = re.compile(
 # Per-entry extraction patterns
 _ENTRY_PATTERNS = {
     "lighter_vessel": [
-        r"(?i)(?:mv[:\.\s]+|lighter[:\s]*)([a-z0-9\s\-\.]+?)(?=\s*(?:cap|mob|dest|\d{10,}|m\.?t))",
-        r"(?i)([a-z][a-z0-9\s\-\.]+?)(?=\s*(?:cap|mob|dest|\d{10,}|m\.?t))",
+        r"(?i)(?:mv[:\.\s]+|lighter[:\s]*)([a-zA-Z0-9\u0980-\u09FF\s\-\.]+?)(?=\s*(?:cap|mob|dest|\d{10,}|m\.?t))",
+        r"(?i)([a-zA-Z\u0980-\u09FF][a-zA-Z0-9\u0980-\u09FF\s\-\.]+?)(?=\s*(?:cap|mob|dest|\d{10,}|m\.?t))",
     ],
     "capacity": [
         r"(?i)cap(?:acity)?[:\s]*(\d+)\s*m\.?t",
@@ -225,11 +230,13 @@ def _extract_entry_fields(entry_text: str) -> dict:
             match = re.search(pattern, entry_text, re.IGNORECASE)
             if match:
                 raw = match.group(1).strip()
-                # Normalize mobile — remove dashes/spaces
+                # Normalize mobile — remove dashes/spaces, enforce 11-digit
                 if field_name == "mobile_number":
-                    raw = raw.replace("-", "").replace(" ", "")
+                    raw = raw.replace("-", "").replace(" ", "").replace("+880", "0")
                     if not raw.startswith("0") and len(raw) == 10:
                         raw = "0" + raw
+                    if not re.match(r"^0\d{10}$", raw):
+                        continue
                 value = raw
                 conf = 0.9
                 break

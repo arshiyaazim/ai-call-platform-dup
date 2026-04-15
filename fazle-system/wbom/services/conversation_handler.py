@@ -261,8 +261,8 @@ class ConversationHandler:
     def _extract_vessel_from_query(message_body: str) -> Optional[str]:
         """Try to extract a vessel name from a status query."""
         patterns = [
-            r"(?i)m\.?v\.?\s*([a-z0-9\s\-\.]+?)(?=\s*\?|\s*status|\s*কোথায়|$)",
-            r"(?i)(?:vessel|জাহাজ)\s+([a-z0-9\s\-\.]+?)(?=\s*\?|$)",
+            r"(?i)m\.?v\.?\s*([a-zA-Z0-9\u0980-\u09FF\s\-\.]+?)(?=\s*\?|\s*status|\s*কোথায়|$)",
+            r"(?i)(?:vessel|জাহাজ)\s+([a-zA-Z0-9\u0980-\u09FF\s\-\.]+?)(?=\s*\?|$)",
         ]
         for pattern in patterns:
             match = re.search(pattern, message_body)

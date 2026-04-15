@@ -76,20 +76,41 @@ def subagent_complete_template(req: TemplateCompletionRequest):
         mobile = req.template_data.get("mobile_number")
         if mobile:
             employee = pay_processor.find_employee_by_mobile(mobile)
-        if employee:
-            from decimal import Decimal
-            amount_str = req.template_data.get("amount", "0")
-            try:
-                amount = Decimal(amount_str)
-            except Exception:
-                amount = Decimal("0")
-            db_result = pay_processor.record_cash_transaction(
-                employee_id=employee["employee_id"],
-                amount=amount,
-                payment_method=req.template_data.get("payment_method", "Cash"),
-                payment_mobile=mobile,
-                message_id=req.message_id,
-            )
+        if not employee:
+            raise HTTPException(400, detail="Employee not found for mobile")
+        # Name validation
+        extracted_name = req.template_data.get("employee_name", "")
+        if extracted_name:
+            from difflib import SequenceMatcher
+            ratio = SequenceMatcher(
+                None,
+                extracted_name.lower().strip(),
+                employee["employee_name"].lower().strip(),
+            ).ratio()
+            if ratio < 0.80:
+                raise HTTPException(400, detail={
+                    "error": "name_mismatch",
+                    "extracted": extracted_name,
+                    "database": employee["employee_name"],
+                    "ratio": round(ratio, 2),
+                })
+        from decimal import Decimal, InvalidOperation
+        amount_str = req.template_data.get("amount", "")
+        if not amount_str:
+            raise HTTPException(400, detail="Amount is required")
+        try:
+            amount = Decimal(amount_str)
+        except (InvalidOperation, ValueError):
+            raise HTTPException(400, detail=f"Invalid amount: {amount_str}")
+        if amount <= 0:
+            raise HTTPException(400, detail="Amount must be positive")
+        db_result = pay_processor.record_cash_transaction(
+            employee_id=employee["employee_id"],
+            amount=amount,
+            payment_method=req.template_data.get("payment_method", "Cash"),
+            payment_mobile=mobile,
+            message_id=req.message_id,
+        )
 
     # Update message status
     update_row_no_ts("wbom_whatsapp_messages", "message_id", req.message_id, {
