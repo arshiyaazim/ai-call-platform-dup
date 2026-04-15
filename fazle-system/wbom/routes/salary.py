@@ -2,7 +2,7 @@
 # WBOM — Salary Routes
 # Auto-generation and management of salary records
 # ============================================================
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException
 
 from models import SalaryGenerateRequest, SalaryResponse
 from services.salary_generator import generate_salary, get_salary_summary, mark_salary_paid
@@ -17,7 +17,7 @@ def generate(req: SalaryGenerateRequest):
 
 
 @router.get("/summary/{month}")
-def summary(month: str = Query(..., pattern=r"^\d{4}-\d{2}$")):
+def summary(month: str):
     rows = get_salary_summary(month)
     total = sum(r.get("net_salary", 0) for r in rows)
     return {"month": month, "records": rows, "total_payable": total}
