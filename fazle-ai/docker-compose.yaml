@@ -375,6 +375,7 @@ services:
     restart: unless-stopped
     environment:
       FAZLE_API_URL: "http://fazle-api:8100"
+      WBOM_URL: "http://fazle-wbom:9900"
       NEXTAUTH_URL: "${FAZLE_NEXTAUTH_URL:-https://fazle.iamazim.com}"
       NEXTAUTH_SECRET: "${FAZLE_JWT_SECRET:?FAZLE_JWT_SECRET not set}"
       PORT: "3020"

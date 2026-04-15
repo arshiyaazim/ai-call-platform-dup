@@ -5,6 +5,10 @@ const nextConfig = {
   async rewrites() {
     return [
       {
+        source: '/api/fazle/wbom/:path*',
+        destination: `${process.env.WBOM_URL || 'http://fazle-wbom:9900'}/api/wbom/:path*`,
+      },
+      {
         source: '/api/fazle/:path*',
         destination: `${process.env.FAZLE_API_URL || 'http://fazle-api:8100'}/fazle/:path*`,
       },
