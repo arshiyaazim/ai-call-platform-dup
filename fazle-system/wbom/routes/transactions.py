@@ -18,39 +18,40 @@ def create_transaction(data: TransactionCreate):
     return row
 
 
-@router.get("/{transaction_id}", response_model=TransactionResponse)
-def get_transaction(transaction_id: int):
-    row = get_row("wbom_cash_transactions", "transaction_id", transaction_id)
-    if not row:
-        raise HTTPException(404, "Transaction not found")
-    return row
-
-
-@router.delete("/{transaction_id}")
-def remove_transaction(transaction_id: int):
-    if not delete_row("wbom_cash_transactions", "transaction_id", transaction_id):
-        raise HTTPException(404, "Transaction not found")
-    return {"deleted": True}
-
-
-@router.get("", response_model=list[TransactionResponse])
-def list_transactions(
+@router.get("/count")
+def transaction_count(
     transaction_type: Optional[str] = None,
     payment_method: Optional[str] = None,
-    transaction_date: Optional[date] = None,
-    limit: int = Query(50, le=200),
-    offset: int = 0,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    search: Optional[str] = None,
 ):
-    filters = {}
+    """Get total count for pagination."""
+    conditions = []
+    params = []
+    joins = ""
+    if search:
+        joins = "LEFT JOIN wbom_employees e ON t.employee_id = e.employee_id"
+        conditions.append("(e.employee_name ILIKE %s OR t.remarks ILIKE %s)")
+        params.extend([f"%{search}%", f"%{search}%"])
     if transaction_type:
-        filters["transaction_type"] = transaction_type
+        conditions.append("t.transaction_type = %s")
+        params.append(transaction_type)
     if payment_method:
-        filters["payment_method"] = payment_method
-    if transaction_date:
-        filters["transaction_date"] = str(transaction_date)
-    return list_rows(
-        "wbom_cash_transactions", filters, "transaction_date DESC, transaction_time DESC", limit, offset
+        conditions.append("t.payment_method = %s")
+        params.append(payment_method)
+    if date_from:
+        conditions.append("t.transaction_date >= %s")
+        params.append(str(date_from))
+    if date_to:
+        conditions.append("t.transaction_date <= %s")
+        params.append(str(date_to))
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = execute_query(
+        f"SELECT COUNT(*) as total FROM wbom_cash_transactions t {joins} {where}",
+        tuple(params),
     )
+    return {"total": rows[0]["total"] if rows else 0}
 
 
 @router.get("/daily-summary/{day}")
@@ -72,8 +73,67 @@ def daily_summary(day: date):
     return {"date": str(day), "breakdown": rows, "total_income": income, "total_expense": expense, "net": income - expense}
 
 
-@router.get("/by-employee/{employee_id}", response_model=list[TransactionResponse])
+@router.get("/by-employee/{employee_id}")
 def transactions_by_employee(employee_id: int, limit: int = Query(50, le=200)):
-    return list_rows(
-        "wbom_cash_transactions", {"employee_id": employee_id}, "transaction_date DESC", limit, 0
+    return execute_query(
+        "SELECT t.*, e.employee_name FROM wbom_cash_transactions t "
+        "LEFT JOIN wbom_employees e ON t.employee_id = e.employee_id "
+        "WHERE t.employee_id = %s ORDER BY t.transaction_date DESC, t.transaction_time DESC LIMIT %s",
+        (employee_id, limit),
     )
+
+
+@router.get("/{transaction_id}", response_model=TransactionResponse)
+def get_transaction(transaction_id: int):
+    row = get_row("wbom_cash_transactions", "transaction_id", transaction_id)
+    if not row:
+        raise HTTPException(404, "Transaction not found")
+    return row
+
+
+@router.delete("/{transaction_id}")
+def remove_transaction(transaction_id: int):
+    if not delete_row("wbom_cash_transactions", "transaction_id", transaction_id):
+        raise HTTPException(404, "Transaction not found")
+    return {"deleted": True}
+
+
+@router.get("")
+def list_transactions(
+    transaction_type: Optional[str] = None,
+    payment_method: Optional[str] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    search: Optional[str] = None,
+    limit: int = Query(50, le=200),
+    offset: int = 0,
+):
+    """List transactions with employee name join, date range, and search."""
+    conditions = []
+    params = []
+    joins = "LEFT JOIN wbom_employees e ON t.employee_id = e.employee_id"
+    if transaction_type:
+        conditions.append("t.transaction_type = %s")
+        params.append(transaction_type)
+    if payment_method:
+        conditions.append("t.payment_method = %s")
+        params.append(payment_method)
+    if date_from:
+        conditions.append("t.transaction_date >= %s")
+        params.append(str(date_from))
+    if date_to:
+        conditions.append("t.transaction_date <= %s")
+        params.append(str(date_to))
+    if search:
+        conditions.append("(e.employee_name ILIKE %s OR t.remarks ILIKE %s)")
+        params.extend([f"%{search}%", f"%{search}%"])
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    sql = f"""
+        SELECT t.*, e.employee_name, e.employee_mobile
+        FROM wbom_cash_transactions t {joins}
+        {where}
+        ORDER BY t.transaction_date DESC, t.transaction_time DESC
+        LIMIT %s OFFSET %s
+    """
+    params.extend([limit, offset])
+    return execute_query(sql, tuple(params))

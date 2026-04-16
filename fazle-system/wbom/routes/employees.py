@@ -5,7 +5,7 @@
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 
-from database import insert_row, get_row, update_row, delete_row, list_rows, search_rows
+from database import insert_row, get_row, update_row, delete_row, list_rows, search_rows, execute_query, count_rows
 from models import EmployeeCreate, EmployeeUpdate, EmployeeResponse
 
 router = APIRouter(prefix="/employees", tags=["employees"])
@@ -17,43 +17,27 @@ def create_employee(data: EmployeeCreate):
     return row
 
 
-@router.get("/{employee_id}", response_model=EmployeeResponse)
-def get_employee(employee_id: int):
-    row = get_row("wbom_employees", "employee_id", employee_id)
-    if not row:
-        raise HTTPException(404, "Employee not found")
-    return row
-
-
-@router.put("/{employee_id}", response_model=EmployeeResponse)
-def update_employee(employee_id: int, data: EmployeeUpdate):
-    fields = data.model_dump(exclude_none=True)
-    row = update_row("wbom_employees", "employee_id", employee_id, fields)
-    if not row:
-        raise HTTPException(404, "Employee not found")
-    return row
-
-
-@router.delete("/{employee_id}")
-def remove_employee(employee_id: int):
-    if not delete_row("wbom_employees", "employee_id", employee_id):
-        raise HTTPException(404, "Employee not found")
-    return {"deleted": True}
-
-
-@router.get("", response_model=list[EmployeeResponse])
-def list_employees(
+@router.get("/count")
+def employee_count(
     status: Optional[str] = None,
     designation: Optional[str] = None,
-    limit: int = Query(50, le=200),
-    offset: int = 0,
+    search: Optional[str] = None,
 ):
-    filters = {}
+    """Get total count for pagination."""
+    conditions = []
+    params = []
     if status:
-        filters["status"] = status
+        conditions.append("status = %s")
+        params.append(status)
     if designation:
-        filters["designation"] = designation
-    return list_rows("wbom_employees", filters, "employee_name", limit, offset)
+        conditions.append("designation = %s")
+        params.append(designation)
+    if search:
+        conditions.append("(employee_name ILIKE %s OR employee_mobile ILIKE %s)")
+        params.extend([f"%{search}%", f"%{search}%"])
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = execute_query(f"SELECT COUNT(*) as total FROM wbom_employees {where}", tuple(params))
+    return {"total": rows[0]["total"] if rows else 0}
 
 
 @router.get("/search/{query}")
@@ -75,3 +59,85 @@ def get_by_mobile(mobile: str):
     if not rows:
         raise HTTPException(404, "Employee not found")
     return rows[0]
+
+
+@router.get("/{employee_id}", response_model=EmployeeResponse)
+def get_employee(employee_id: int):
+    row = get_row("wbom_employees", "employee_id", employee_id)
+    if not row:
+        raise HTTPException(404, "Employee not found")
+    return row
+
+
+@router.get("/{employee_id}/detail")
+def get_employee_detail(employee_id: int):
+    """Get employee with all programs and transactions."""
+    emp = get_row("wbom_employees", "employee_id", employee_id)
+    if not emp:
+        raise HTTPException(404, "Employee not found")
+
+    emp["programs"] = execute_query(
+        "SELECT * FROM wbom_escort_programs "
+        "WHERE escort_employee_id = %s "
+        "ORDER BY CASE WHEN status = 'Completed' THEN 0 "
+        "              WHEN status = 'Running' THEN 1 ELSE 2 END, "
+        "         program_date DESC NULLS LAST",
+        (employee_id,),
+    )
+    emp["transactions"] = execute_query(
+        "SELECT * FROM wbom_cash_transactions "
+        "WHERE employee_id = %s "
+        "ORDER BY transaction_date DESC, transaction_time DESC",
+        (employee_id,),
+    )
+    emp["total_programs"] = len(emp["programs"])
+    emp["total_transactions"] = len(emp["transactions"])
+    emp["total_amount"] = sum(float(t.get("amount", 0)) for t in emp["transactions"])
+    return emp
+
+
+@router.put("/{employee_id}", response_model=EmployeeResponse)
+def update_employee(employee_id: int, data: EmployeeUpdate):
+    fields = data.model_dump(exclude_none=True)
+    row = update_row("wbom_employees", "employee_id", employee_id, fields)
+    if not row:
+        raise HTTPException(404, "Employee not found")
+    return row
+
+
+@router.delete("/{employee_id}")
+def remove_employee(employee_id: int):
+    if not delete_row("wbom_employees", "employee_id", employee_id):
+        raise HTTPException(404, "Employee not found")
+    return {"deleted": True}
+
+
+@router.get("")
+def list_employees(
+    status: Optional[str] = None,
+    designation: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = Query(50, le=200),
+    offset: int = 0,
+):
+    """List employees with optional search, filter, and pagination."""
+    if search:
+        conditions = ["(employee_name ILIKE %s OR employee_mobile ILIKE %s)"]
+        params = [f"%{search}%", f"%{search}%"]
+        if status:
+            conditions.append("status = %s")
+            params.append(status)
+        if designation:
+            conditions.append("designation = %s")
+            params.append(designation)
+        where = f"WHERE {' AND '.join(conditions)}"
+        sql = f"SELECT * FROM wbom_employees {where} ORDER BY employee_name LIMIT %s OFFSET %s"
+        params.extend([limit, offset])
+        return execute_query(sql, tuple(params))
+
+    filters = {}
+    if status:
+        filters["status"] = status
+    if designation:
+        filters["designation"] = designation
+    return list_rows("wbom_employees", filters, "employee_name", limit, offset)
