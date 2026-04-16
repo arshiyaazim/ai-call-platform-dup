@@ -933,6 +933,8 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /tmp
+    ports:
+      - "127.0.0.1:9900:9900"
     environment:
       WBOM_DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD not set}@postgres:5432/${POSTGRES_DB:-postgres}"
       WBOM_BRAIN_URL: "http://fazle-brain:8200"
