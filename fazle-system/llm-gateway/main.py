@@ -329,7 +329,7 @@ async def _call_ollama(
     max_tokens: Optional[int] = None,
 ) -> dict:
     """Call local Ollama chat API."""
-    options = {"temperature": temperature}
+    options = {"temperature": temperature, "num_ctx": 4096}
     if max_tokens is not None:
         options["num_predict"] = max_tokens
     body: dict = {
@@ -427,7 +427,7 @@ async def _stream_ollama(
     max_tokens: Optional[int] = None,
 ):
     """Stream from Ollama chat API."""
-    options = {"temperature": temperature}
+    options = {"temperature": temperature, "num_ctx": 4096}
     if max_tokens is not None:
         options["num_predict"] = max_tokens
     body: dict = {
