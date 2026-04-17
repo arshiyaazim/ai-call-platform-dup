@@ -4,15 +4,10 @@ const nextConfig = {
   reactStrictMode: true,
   async rewrites() {
     const apiUrl = process.env.FAZLE_API_URL || "http://fazle-api:8100";
-    const wbomUrl = process.env.WBOM_API_URL || "http://wbom:9900";
     return [
       {
         source: "/api/fazle/:path*",
         destination: `${apiUrl}/fazle/:path*`,
-      },
-      {
-        source: "/api/wbom/:path*",
-        destination: `${wbomUrl}/api/wbom/:path*`,
       },
       {
         source: "/api/setup-status",
