@@ -643,6 +643,8 @@ async def execute_actions(actions: list[dict]):
     """Execute actions decided by the brain."""
     async with httpx.AsyncClient(timeout=30.0) as client:
         for action in actions:
+            if not isinstance(action, dict):
+                continue
             action_type = action.get("type", "")
             try:
                 if action_type == "web_search":
