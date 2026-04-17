@@ -8,6 +8,7 @@ from typing import Optional
 from database import insert_row, get_row, update_row, delete_row, list_rows, audit_log, count_rows
 from models import ClientCreate, ClientUpdate, ClientResponse
 from response import api_response, api_single
+from openapi_models import ClientListResponse, SingleEnvelope
 
 router = APIRouter(prefix="/clients", tags=["clients"])
 
@@ -21,7 +22,7 @@ def create_client(data: ClientCreate):
     return api_single(row, entity="clients")
 
 
-@router.get("")
+@router.get("", response_model=ClientListResponse)
 def list_clients(
     client_type: Optional[str] = None,
     is_active: Optional[bool] = None,

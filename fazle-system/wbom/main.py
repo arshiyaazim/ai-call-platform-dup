@@ -78,6 +78,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="WBOM — WhatsApp Business Operations Manager",
     version="1.0.0",
+    description="Full CRUD API for employees, transactions, clients, job applications, audit logs, and payments. "
+                "All list endpoints return a standard envelope: {success, data, meta, schema, version}.",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
     lifespan=lifespan,
 )
 

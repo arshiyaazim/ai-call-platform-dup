@@ -8,11 +8,12 @@ from typing import Optional
 from database import execute_query
 from models import AuditLogResponse
 from response import api_response
+from openapi_models import AuditListResponse
 
 router = APIRouter(prefix="/audit", tags=["audit"])
 
 
-@router.get("")
+@router.get("", response_model=AuditListResponse)
 def list_audit_logs(
     event: Optional[str] = None,
     actor: Optional[str] = None,

@@ -5,7 +5,7 @@ import WbomTable, { StatusBadge, MetaBar } from "../../../../lib/wbom-table";
 
 export default function ApplicationsPage() {
   const { put } = useWbomApi();
-  const { rows, meta, loading, error, reload } = useWbomList("/job-applications?limit=100");
+  const { rows, meta, loading, error, reload } = useWbomList("/job-applications?limit=100", [], "applications");
 
   async function updateStatus(id, newStatus) {
     try {

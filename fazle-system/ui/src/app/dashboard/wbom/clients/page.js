@@ -14,7 +14,7 @@ const COLUMNS = [
 ];
 
 export default function ClientsPage() {
-  const { rows, meta, loading, error } = useWbomList("/clients?limit=100");
+  const { rows, meta, loading, error } = useWbomList("/clients?limit=100", [], "clients");
 
   return (
     <div>

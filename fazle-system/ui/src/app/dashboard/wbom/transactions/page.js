@@ -14,7 +14,7 @@ const COLUMNS = [
 ];
 
 export default function TransactionsPage() {
-  const { rows, meta, loading, error } = useWbomList("/transactions?limit=100");
+  const { rows, meta, loading, error } = useWbomList("/transactions?limit=100", [], "transactions");
 
   return (
     <div>

@@ -2,6 +2,7 @@
 
 import { useSession } from "next-auth/react";
 import { useCallback, useRef, useEffect, useState } from "react";
+import { validateEnvelope, validateRows } from "./wbom-schemas";
 
 const BASE = "/api/wbom";
 
@@ -57,20 +58,36 @@ export function useWbomApi() {
 
 // ── Unwrap standard envelope ─────────────────────────────────
 // Handles both old (raw array) and new ({ success, data }) formats.
+// Applies Zod validation when entity name is provided.
 
-function unwrapList(json) {
+function unwrapList(json, entity = null) {
   if (json && json.success && Array.isArray(json.data)) {
+    // Validate envelope structure
+    try { validateEnvelope(json); } catch (e) {
+      console.warn("[WBOM] Envelope validation failed:", e.message);
+    }
+    // Validate individual rows if entity is known
+    let rows = json.data;
+    if (entity) {
+      const { valid } = validateRows(entity, rows);
+      rows = valid;
+    }
     return {
-      rows: json.data,
-      meta: json.meta || { total: json.data.length, page: 1, count: json.data.length },
+      rows,
+      meta: json.meta || { total: rows.length, page: 1, count: rows.length },
       schema: json.schema || {},
     };
   }
   // Legacy: raw array response (backward compat)
   if (Array.isArray(json)) {
+    let rows = json;
+    if (entity) {
+      const { valid } = validateRows(entity, rows);
+      rows = valid;
+    }
     return {
-      rows: json,
-      meta: { total: json.length, page: 1, count: json.length },
+      rows,
+      meta: { total: rows.length, page: 1, count: rows.length },
       schema: {},
     };
   }
@@ -79,10 +96,12 @@ function unwrapList(json) {
 }
 
 
-// ── useWbomList: fetch + unwrap + state management ───────────
+// ── useWbomList: fetch + unwrap + validate + state management ─
 // Returns { rows, meta, schema, loading, error, reload }
+// Pass entity name to enable Zod row validation:
+//   useWbomList("/employees", [], "employees")
 
-export function useWbomList(path, deps = []) {
+export function useWbomList(path, deps = [], entity = null) {
   const { get } = useWbomApi();
   const [rows, setRows] = useState([]);
   const [meta, setMeta] = useState({ total: 0, page: 1, count: 0 });
@@ -102,7 +121,7 @@ export function useWbomList(path, deps = []) {
     get(path)
       .then((json) => {
         if (!mountedRef.current) return;
-        const result = unwrapList(json);
+        const result = unwrapList(json, entity);
         setRows(result.rows);
         setMeta(result.meta);
         setSchema(result.schema);
@@ -116,7 +135,7 @@ export function useWbomList(path, deps = []) {
         if (mountedRef.current) setLoading(false);
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [get, path, ...deps]);
+  }, [get, path, entity, ...deps]);
 
   useEffect(() => { reload(); }, [reload]);
 

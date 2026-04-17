@@ -6,7 +6,7 @@ import WbomTable, { StatusBadge, MetaBar } from "../../../../lib/wbom-table";
 
 export default function PaymentsPage() {
   const { post } = useWbomApi();
-  const { rows, meta, loading, error, reload } = useWbomList("/payment/pending?limit=50");
+  const { rows, meta, loading, error, reload } = useWbomList("/payment/pending?limit=50", [], "payments");
   const [actionMsg, setActionMsg] = useState(null);
 
   async function approveAndExecute(staging_id) {

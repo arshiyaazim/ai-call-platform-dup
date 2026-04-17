@@ -9,6 +9,7 @@ from datetime import date
 from database import insert_row, insert_row_dedup, get_row, delete_row, list_rows, execute_query, audit_log
 from models import TransactionCreate, TransactionResponse
 from response import api_response, api_single
+from openapi_models import TransactionListResponse, SingleEnvelope
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
@@ -145,7 +146,7 @@ def remove_transaction(transaction_id: int):
     return {"deleted": True}
 
 
-@router.get("")
+@router.get("", response_model=TransactionListResponse)
 def list_transactions(
     transaction_type: Optional[str] = None,
     payment_method: Optional[str] = None,

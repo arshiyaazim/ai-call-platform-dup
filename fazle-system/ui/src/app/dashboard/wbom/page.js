@@ -21,7 +21,7 @@ function StatCard({ label, value, icon, loading }) {
 export default function WbomDashboard() {
   const emp = useWbomCount("/employees/count");
   const tx  = useWbomCount("/transactions/count");
-  const pay = useWbomList("/payment/pending?limit=5");
+  const pay = useWbomList("/payment/pending?limit=5", [], "payments");
 
   const anyError = pay.error;
 

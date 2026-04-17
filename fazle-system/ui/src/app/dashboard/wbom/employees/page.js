@@ -14,7 +14,7 @@ const COLUMNS = [
 ];
 
 export default function EmployeesPage() {
-  const { rows, meta, loading, error } = useWbomList("/employees?limit=100");
+  const { rows, meta, loading, error } = useWbomList("/employees?limit=100", [], "employees");
   const [search, setSearch] = useState("");
 
   const filtered = useMemo(() => {

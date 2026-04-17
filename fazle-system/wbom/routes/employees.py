@@ -8,6 +8,7 @@ from typing import Optional
 from database import insert_row, get_row, update_row, delete_row, list_rows, search_rows, execute_query, count_rows
 from models import EmployeeCreate, EmployeeUpdate, EmployeeResponse
 from response import api_response, api_single
+from openapi_models import EmployeeListResponse, SingleEnvelope
 
 router = APIRouter(prefix="/employees", tags=["employees"])
 
@@ -113,7 +114,7 @@ def remove_employee(employee_id: int):
     return {"deleted": True}
 
 
-@router.get("")
+@router.get("", response_model=EmployeeListResponse)
 def list_employees(
     status: Optional[str] = None,
     designation: Optional[str] = None,

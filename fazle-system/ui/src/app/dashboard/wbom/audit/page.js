@@ -19,7 +19,7 @@ const COLUMNS = [
 export default function AuditLogPage() {
   const [filter, setFilter] = useState("");
   const params = filter ? `?entity_type=${encodeURIComponent(filter)}&limit=100` : "?limit=100";
-  const { rows, meta, loading, error } = useWbomList(`/audit${params}`, [filter]);
+  const { rows, meta, loading, error } = useWbomList(`/audit${params}`, [filter], "audit");
 
   return (
     <div>
