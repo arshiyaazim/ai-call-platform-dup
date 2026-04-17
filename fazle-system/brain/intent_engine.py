@@ -13,14 +13,47 @@
 # Step 8: Smart fallback with contextual suggestions
 # ============================================================
 
+import json
 import logging
 import random
 import time as _time
+from dataclasses import dataclass, field
 from typing import Optional
 
 from context_builder import normalize_text
 
 logger = logging.getLogger("fazle-brain.intent")
+
+
+# ═══════════════════════════════════════════════════════════
+# Structured Intent Result
+# ═══════════════════════════════════════════════════════════
+
+CONFIDENCE_THRESHOLD = 0.40  # below this → fall through to AI
+
+
+@dataclass
+class IntentResult:
+    """Structured routing result from intent detection."""
+    intent: str = "fallback"
+    route: str = "ai_fallback"
+    confidence: float = 0.0
+    sender_role: str = "social_unknown"
+    reply: str = ""
+    secondary_intents: list[str] = field(default_factory=list)
+    needs_clarification: bool = False
+    reason: list[str] = field(default_factory=list)
+
+
+# ── Role-based intent gating ─────────────────────────────
+# Maps sender_role → set of intent name prefixes that are BLOCKED
+_ROLE_BLOCKS: dict[str, set[str]] = {
+    "social_unknown": {"owner_"},   # unknown users can't trigger owner intents
+    "job_seeker": {"owner_"},
+    "employee": set(),              # employees can access most things
+    "client": set(),
+    "owner": set(),                 # owner can access everything
+}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -70,6 +103,17 @@ _CONFIRM_WORDS = [
 ]
 _CONFIRM_EN = {"yes", "yeah", "ok", "detail", "details"}
 
+# ── Expanded follow-up patterns (inherit previous intent context) ──
+_FOLLOWUP_WORDS_BN = [
+    "কত", "কবে", "কোথায়", "কিভাবে", "আর", "তাহলে",
+    "ঠিক আছে", "apply করবো", "details দিন", "আরও",
+    "বলুন", "জানান", "পাঠান",
+]
+_FOLLOWUP_EN = {
+    "how much", "when", "where", "how", "and", "then",
+    "apply", "details please", "tell me", "send",
+}
+
 _NEGATIVE_WORDS = [
     "পরে জানাবো", "পরে", "ব্যস্ত", "দরকার নেই", "লাগবে না",
     "না থাক",
@@ -92,7 +136,7 @@ _REQUEST_WORDS = ["লাগবে", "চাই", "দরকার", "প্র�
 
 
 def _classify(text: str, norm: str) -> str:
-    """Classify message → greeting/thanks/farewell/negative/confirm/statement/question/request/unknown."""
+    """Classify message → greeting/thanks/farewell/negative/confirm/followup/statement/question/request/unknown."""
     low = text.lower().strip()
     words_en = set(low.split())
 
@@ -116,6 +160,11 @@ def _classify(text: str, norm: str) -> str:
     if len(low.split()) <= 5:
         if any(c in norm for c in _CONFIRM_WORDS) or words_en & _CONFIRM_EN:
             return "confirm"
+
+    # Follow-up detection (short messages that extend previous context)
+    if len(low.split()) <= 6:
+        if any(f in norm for f in _FOLLOWUP_WORDS_BN) or any(f in low for f in _FOLLOWUP_EN):
+            return "followup"
 
     # Statement / acknowledgment
     if any(s in norm for s in _STATEMENT_WORDS) or words_en & _STATEMENT_EN:
@@ -1112,55 +1161,111 @@ _GENERIC_FALLBACKS = [
 # Step 3: Intent matching
 # ═══════════════════════════════════════════════════════════
 
-def _match_intent(norm: str) -> Optional[dict]:
-    """Match normalized message against compound intents.
+def _score_intent(intent: dict, norm: str, sender_role: str = "social_unknown") -> float:
+    """Score an intent match with confidence (0.0-1.0).
 
+    Scoring factors:
+    - Base: 0.50 for any match
+    - Word count bonus: +0.08 per word in matching condition (more specific = higher)
+    - Multiple condition matches: +0.04 per extra matching condition
+    - Priority bonus: intent priority * 0.05
+    - Role gating: blocked intents get score 0.0
+    """
+    intent_name = intent["name"]
+
+    # Role gating — check if this role is blocked from this intent
+    blocked = _ROLE_BLOCKS.get(sender_role, set())
+    if any(intent_name.startswith(prefix) for prefix in blocked):
+        return 0.0
+
+    matched_conditions = 0
+    best_word_count = 0
+    for condition in intent["conditions"]:
+        if all(word in norm for word in condition):
+            matched_conditions += 1
+            if len(condition) > best_word_count:
+                best_word_count = len(condition)
+
+    if matched_conditions == 0:
+        return 0.0
+
+    # Base score
+    score = 0.50
+
+    # Word specificity bonus: more words in condition = more specific match
+    score += best_word_count * 0.08
+
+    # Multi-condition bonus: matching multiple conditions = stronger signal
+    if matched_conditions > 1:
+        score += (matched_conditions - 1) * 0.04
+
+    # Priority bonus
+    pri = intent.get("priority", 0)
+    score += pri * 0.05
+
+    # Role affinity boost: employee asking about salary/duty = stronger match
+    if sender_role == "employee" and intent_name.startswith(("job_salary", "job_duty", "job_leave", "job_post")):
+        score += 0.10
+    elif sender_role == "client" and intent_name.startswith(("service_", "rate_", "billing", "complaint")):
+        score += 0.10
+    elif sender_role == "job_seeker" and intent_name.startswith(("job_",)):
+        score += 0.08
+
+    return min(score, 1.0)
+
+
+def _match_intent(norm: str, sender_role: str = "social_unknown") -> Optional[tuple[dict, float]]:
+    """Match normalized message against compound intents with confidence scoring.
+
+    Returns (intent, confidence) or None.
     Uses priority field (default 0): higher priority wins.
     At equal priority, first match in list wins.
     General intents use priority -1 so specific intents always win.
     """
     best = None
-    best_pri = -999
+    best_score = 0.0
     for intent in INTENTS:
-        pri = intent.get("priority", 0)
-        if pri <= best_pri:
-            continue  # can't beat current best
-        for condition in intent["conditions"]:
-            if all(word in norm for word in condition):
-                best = intent
-                best_pri = pri
-                break
-    return best
+        score = _score_intent(intent, norm, sender_role)
+        if score > best_score:
+            best = intent
+            best_score = score
+    if best and best_score >= CONFIDENCE_THRESHOLD:
+        return (best, best_score)
+    return None
 
 
-def _match_multi_intent(norm: str, max_intents: int = 4) -> list[dict]:
-    """Match ALL intents in a message for multi-question handling.
+def _match_multi_intent(
+    norm: str, sender_role: str = "social_unknown", max_intents: int = 4,
+) -> list[tuple[dict, float]]:
+    """Match ALL intents in a message with confidence scores.
 
-    Returns up to max_intents matches, sorted by priority (highest first).
+    Returns list of (intent, confidence) tuples, sorted by score descending.
     Skips generic (priority -1) intents if specific ones are found.
     """
-    matches: list[tuple[int, int, dict]] = []  # (priority, index, intent)
+    matches: list[tuple[float, int, dict]] = []  # (score, index, intent)
     for idx, intent in enumerate(INTENTS):
-        pri = intent.get("priority", 0)
-        for condition in intent["conditions"]:
-            if all(word in norm for word in condition):
-                matches.append((pri, idx, intent))
-                break
+        score = _score_intent(intent, norm, sender_role)
+        if score >= CONFIDENCE_THRESHOLD:
+            matches.append((score, idx, intent))
+
     if not matches:
         return []
-    # Sort by priority descending, then by position in INTENTS
+
+    # Sort by score descending, then by position in INTENTS
     matches.sort(key=lambda x: (-x[0], x[1]))
+
     # If we have specific intents (pri >= 0), drop generic ones (pri < 0)
-    has_specific = any(m[0] >= 0 for m in matches)
+    has_specific = any(m[2].get("priority", 0) >= 0 for m in matches)
     if has_specific:
-        matches = [m for m in matches if m[0] >= 0]
+        matches = [m for m in matches if m[2].get("priority", 0) >= 0]
+
     # Deduplicate by intent name
     seen: set[str] = set()
-    result: list[dict] = []
-    for _, _, intent in matches:
+    result: list[tuple[dict, float]] = []
+    for score, _, intent in matches:
         if intent["name"] not in seen:
             seen.add(intent["name"])
-            result.append(intent)
+            result.append((intent, score))
             if len(result) >= max_intents:
                 break
     return result
@@ -1211,20 +1316,72 @@ def _smart_fallback(norm: str, conv_id: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════
-# Main: 8-step conversation flow
+# Route Map — intent → backend route resolution
 # ═══════════════════════════════════════════════════════════
 
-def process_social_intent(message: str, conv_id: str) -> str:
+# Maps (intent_name, sender_role) → route string.
+# If an intent is not listed here it defaults to "social_reply".
+# "wbom_employee_message" means the brain should forward the
+# original user message to WBOM /self-service/message.
+
+ROUTE_MAP: dict[tuple[str, str], str] = {
+    # ── Employee self-service (WBOM) ──
+    # Salary / payment
+    ("salary_query",       "employee"): "wbom_employee_message",
+    ("job_salary_payment", "employee"): "wbom_employee_message",
+    # Leave / duty / schedule
+    ("job_leave",          "employee"): "wbom_employee_message",
+    ("job_post_duty",      "employee"): "wbom_employee_message",
+    ("job_duty_hours",     "employee"): "wbom_employee_message",
+    ("job_accommodation",  "employee"): "wbom_employee_message",
+    ("training",           "employee"): "wbom_employee_message",
+    # Complaints (all subtypes)
+    ("complaint",          "employee"): "wbom_employee_message",
+    ("complaint_absent",   "employee"): "wbom_employee_message",
+    ("complaint_lazy",     "employee"): "wbom_employee_message",
+    ("complaint_rude",     "employee"): "wbom_employee_message",
+    ("complaint_abandoned","employee"): "wbom_employee_message",
+    ("complaint_theft",    "employee"): "wbom_employee_message",
+}
+
+
+def resolve_route(intent_name: str, sender_role: str) -> str:
+    """Return the route string for an intent + role pair."""
+    return ROUTE_MAP.get((intent_name, sender_role), "social_reply")
+
+
+# ═══════════════════════════════════════════════════════════
+# Main: 8-step conversation flow (with confidence + role)
+# ═══════════════════════════════════════════════════════════
+
+def process_social_intent(
+    message: str, conv_id: str, sender_role: str = "social_unknown",
+) -> str:
     """Process social message through 8-step intent flow.
 
     Always returns a reply string — no LLM needed for social.
+    Wrapper around process_social_intent_scored() for backward compatibility.
+    Returns empty string if confidence is below threshold (fall through to AI).
+    """
+    result = process_social_intent_scored(message, conv_id, sender_role)
+    if result.route == "ai_fallback" and result.confidence < CONFIDENCE_THRESHOLD:
+        return ""
+    return result.reply
+
+
+def process_social_intent_scored(
+    message: str, conv_id: str, sender_role: str = "social_unknown",
+) -> IntentResult:
+    """Process social message through 8-step intent flow with structured result.
+
+    Returns IntentResult with confidence scoring and routing metadata.
     """
     norm = normalize_text(message)
     msg_type = _classify(message, norm)
     state = _get_state(conv_id)
 
     logger.info(
-        f"Intent: type={msg_type} norm='{norm[:60]}' "
+        f"Intent: type={msg_type} role={sender_role} norm='{norm[:60]}' "
         f"last={state.get('last_intent')} pending={'yes' if state.get('pending_detail') else 'no'}"
     )
 
@@ -1233,25 +1390,37 @@ def process_social_intent(message: str, conv_id: str) -> str:
         _set_state(conv_id, last_intent=None, pending_detail=None, suggested_intent=None)
         reply = random.choice(_NEGATIVE_REPLIES)
         logger.info(f"Intent result: negative → {reply[:30]}")
-        return reply
+        return IntentResult(
+            intent="negative", route="social_reply", confidence=0.95,
+            sender_role=sender_role, reply=reply, reason=["negative_filter"],
+        )
 
     # ── Greeting ──
     if msg_type == "greeting":
         _set_state(conv_id, last_intent="greeting", pending_detail=None, suggested_intent=None)
         logger.info("Intent result: greeting")
-        return _GREETING_REPLY
+        return IntentResult(
+            intent="greeting", route="social_reply", confidence=0.95,
+            sender_role=sender_role, reply=_GREETING_REPLY, reason=["greeting_detected"],
+        )
 
     # ── Thanks ──
     if msg_type == "thanks":
         _clear_state(conv_id)
         logger.info("Intent result: thanks")
-        return _THANKS_REPLY
+        return IntentResult(
+            intent="thanks", route="social_reply", confidence=0.95,
+            sender_role=sender_role, reply=_THANKS_REPLY, reason=["thanks_detected"],
+        )
 
     # ── Farewell ──
     if msg_type == "farewell":
         _clear_state(conv_id)
         logger.info("Intent result: farewell")
-        return _FAREWELL_REPLY
+        return IntentResult(
+            intent="farewell", route="social_reply", confidence=0.95,
+            sender_role=sender_role, reply=_FAREWELL_REPLY, reason=["farewell_detected"],
+        )
 
     # ── Step 7: Confirmation follow-up ──
     if msg_type == "confirm":
@@ -1260,7 +1429,11 @@ def process_social_intent(message: str, conv_id: str) -> str:
         if pending_full:
             _set_state(conv_id, last_intent=state.get("last_intent"), pending_detail=None, pending_full_detail=None)
             logger.info(f"Intent result: confirm → full detail for {state.get('last_intent')}")
-            return pending_full
+            return IntentResult(
+                intent=state.get("last_intent", "confirm"), route="social_reply",
+                confidence=0.90, sender_role=sender_role, reply=pending_full,
+                reason=["confirm_pending_detail"],
+            )
         # Check suggested intent from fallback (user confirmed topic suggestion)
         pending = state.get("pending_detail")
         if pending:
@@ -1281,29 +1454,86 @@ def process_social_intent(message: str, conv_id: str) -> str:
                 suggested_intent=None,
             )
             logger.info(f"Intent result: confirm → suggested {suggested}")
-            return pending
+            return IntentResult(
+                intent=suggested or "confirm", route="social_reply",
+                confidence=0.85, sender_role=sender_role, reply=pending,
+                reason=["confirm_suggested_intent"],
+            )
         # No pending → generic acknowledgment
         logger.info("Intent result: confirm (no pending)")
-        return _STATEMENT_REPLY
+        return IntentResult(
+            intent="confirm", route="social_reply", confidence=0.60,
+            sender_role=sender_role, reply=_STATEMENT_REPLY,
+            reason=["confirm_no_pending"],
+        )
+
+    # ── Follow-up: short message that extends previous intent context ──
+    if msg_type == "followup" and state.get("last_intent"):
+        last = state.get("last_intent")
+        # If there's a pending full detail, give it
+        pending_full = state.get("pending_full_detail")
+        if pending_full:
+            _set_state(conv_id, last_intent=last, pending_detail=None, pending_full_detail=None)
+            logger.info(f"Intent result: followup → detail for {last}")
+            return IntentResult(
+                intent=last, route="social_reply", confidence=0.80,
+                sender_role=sender_role, reply=pending_full,
+                reason=["followup_inherited_context", f"previous_intent={last}"],
+            )
+        # No pending detail — try to find the intent and give its detail
+        for intent in INTENTS:
+            if intent["name"] == last and intent.get("detail"):
+                _set_state(conv_id, last_intent=last, pending_detail=None, pending_full_detail=None)
+                logger.info(f"Intent result: followup → repeat detail for {last}")
+                return IntentResult(
+                    intent=last, route="social_reply", confidence=0.75,
+                    sender_role=sender_role, reply=intent["detail"],
+                    reason=["followup_repeat_detail", f"previous_intent={last}"],
+                )
+        # Can't find detail — fall through to normal matching
 
     # ── Statement / acknowledgment ──
     if msg_type == "statement":
         logger.info("Intent result: statement ack")
-        return _STATEMENT_REPLY
+        return IntentResult(
+            intent="statement", route="social_reply", confidence=0.70,
+            sender_role=sender_role, reply=_STATEMENT_REPLY,
+            reason=["statement_detected"],
+        )
 
     # ── Step 2-3: Intent matching (for question/request/unknown) ──
     # Try multi-intent first for complex messages
-    multi = _match_multi_intent(norm)
+    multi = _match_multi_intent(norm, sender_role)
 
     if len(multi) >= 2:
         # Multi-intent: combine short replies for all matched intents
-        intent_names = [i["name"] for i in multi]
+        intent_names = [i["name"] for i, _ in multi]
+        scores = [s for _, s in multi]
         parts: list[str] = []
-        for intent in multi:
+        for intent, _ in multi:
             parts.append(intent["reply"])
         combined = "\n\n".join(parts)
-        # Store last intent as the first (highest priority) for state tracking
-        first_intent = multi[0]
+        # Store last intent as the first (highest score) for state tracking
+        first_intent, first_score = multi[0]
+
+        # Check if top two are too close → needs clarification
+        if len(multi) >= 2 and (scores[0] - scores[1]) < 0.08:
+            _set_state(
+                conv_id,
+                last_intent=first_intent["name"],
+                pending_detail=None,
+                pending_full_detail=None,
+                suggested_intent=None,
+            )
+            logger.info(f"Intent result: multi-intent close scores {intent_names} {scores}")
+            return IntentResult(
+                intent=first_intent["name"], route=resolve_route(first_intent["name"], sender_role),
+                confidence=first_score, sender_role=sender_role, reply=combined,
+                secondary_intents=intent_names[1:],
+                needs_clarification=True,
+                reason=["multi_intent_close_scores"] + [f"{n}={s:.2f}" for n, s in zip(intent_names, scores)],
+            )
+
         _set_state(
             conv_id,
             last_intent=first_intent["name"],
@@ -1311,20 +1541,32 @@ def process_social_intent(message: str, conv_id: str) -> str:
             pending_full_detail=None,
             suggested_intent=None,
         )
-        logger.info(f"Intent result: multi-intent {intent_names}")
-        return combined
+        logger.info(f"Intent result: multi-intent {intent_names} scores={scores}")
+        return IntentResult(
+            intent=first_intent["name"], route=resolve_route(first_intent["name"], sender_role),
+            confidence=first_score, sender_role=sender_role, reply=combined,
+            secondary_intents=intent_names[1:],
+            reason=["multi_intent_matched"] + [f"{n}={s:.2f}" for n, s in zip(intent_names, scores)],
+        )
 
-    intent = multi[0] if multi else None
+    if multi:
+        intent, score = multi[0]
+    else:
+        intent, score = None, 0.0
 
-    if intent:
+    if intent and score >= CONFIDENCE_THRESHOLD:
         intent_name = intent["name"]
         last_intent = state.get("last_intent")
 
         # Step 5: Context check — same intent repeated → give detail directly
         if last_intent == intent_name and intent.get("detail"):
             _set_state(conv_id, last_intent=intent_name, pending_detail=None, pending_full_detail=None)
-            logger.info(f"Intent result: repeat {intent_name} → detail")
-            return intent["detail"]
+            logger.info(f"Intent result: repeat {intent_name} → detail (conf={score:.2f})")
+            return IntentResult(
+                intent=intent_name, route=resolve_route(intent_name, sender_role), confidence=score,
+                sender_role=sender_role, reply=intent["detail"],
+                reason=["repeat_intent_detail", f"score={score:.2f}"],
+            )
 
         # Step 5+6: Short answer + followup
         if intent.get("detail") and intent.get("followup"):
@@ -1335,15 +1577,34 @@ def process_social_intent(message: str, conv_id: str) -> str:
                 pending_full_detail=intent["detail"],
                 suggested_intent=None,
             )
-            logger.info(f"Intent result: matched {intent_name} → short+followup")
-            return f"{intent['reply']}\n\n{intent['followup']}"
+            logger.info(f"Intent result: matched {intent_name} → short+followup (conf={score:.2f})")
+            return IntentResult(
+                intent=intent_name, route=resolve_route(intent_name, sender_role), confidence=score,
+                sender_role=sender_role,
+                reply=f"{intent['reply']}\n\n{intent['followup']}",
+                reason=["intent_matched", f"score={score:.2f}"],
+            )
 
         # No detail available (emergency) — just reply
         _set_state(conv_id, last_intent=intent_name, pending_detail=None)
-        logger.info(f"Intent result: matched {intent_name} → reply only")
-        return intent["reply"]
+        logger.info(f"Intent result: matched {intent_name} → reply only (conf={score:.2f})")
+        return IntentResult(
+            intent=intent_name, route=resolve_route(intent_name, sender_role), confidence=score,
+            sender_role=sender_role, reply=intent["reply"],
+            reason=["intent_matched_no_detail", f"score={score:.2f}"],
+        )
 
     # ── Step 8: Smart fallback ──
     fallback = _smart_fallback(norm, conv_id)
-    logger.info(f"Intent result: fallback → {fallback[:40]}")
-    return fallback
+    logger.info(json.dumps({
+        "event": "intent_fallback",
+        "best_score": round(score, 2),
+        "sender_role": sender_role,
+        "norm_prefix": norm[:60],
+    }, ensure_ascii=False))
+    return IntentResult(
+        intent="fallback", route="ai_fallback", confidence=score,
+        sender_role=sender_role, reply=fallback,
+        needs_clarification=True,
+        reason=["no_confident_match", f"best_score={score:.2f}"],
+    )

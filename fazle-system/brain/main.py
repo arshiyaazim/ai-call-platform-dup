@@ -20,8 +20,12 @@ from datetime import datetime
 from memory_manager import conversation_get, conversation_set
 from context_builder import build_knowledge_context, build_smart_context, detect_intents, normalize_text, KNOWLEDGE_FALLBACK_BN, get_cached_context, set_cached_context
 from prompt_router import build_route_prompt, get_route_flags
-from intent_engine import process_social_intent, _get_state as _get_intent_state
+from intent_engine import process_social_intent, process_social_intent_scored, _get_state as _get_intent_state
 from lead_capture import try_capture_lead
+from control_layer import (
+    init_control_layer, process_message as control_process_message,
+    IncomingMessage, log_result as control_log_result,
+)
 from persona_engine import build_system_prompt, build_system_prompt_async
 from persona_engine import (
     build_user_history_context, build_anti_repetition_context,
@@ -167,6 +171,7 @@ async def init_agents():
     )
 
     # ── Seed default owner profile if empty (Step 1) ──
+    init_control_layer(settings.redis_url)
     try:
         profile = azim_profile_all()
         if not profile:
@@ -258,6 +263,34 @@ _LLM_TIMEOUT_GATEWAY = 50.0    # Gateway: 50s (must exceed Ollama 45s timeout)
 
 _FALLBACK_REPLY_BN = "দুঃখিত, একটু সমস্যা হয়েছে। আবার বলবেন?"
 _FALLBACK_REPLY_EN = "Sorry, having a small issue. Please try again shortly."
+
+
+# ── WBOM Employee Self-Service Helper ────────────────────────
+async def _call_wbom_employee(sender_phone: str, message: str) -> str | None:
+    """Forward an employee message to WBOM /self-service/message.
+    Returns the WBOM reply string, or None on failure."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{settings.wbom_url}/self-service/message",
+                json={"sender_number": sender_phone, "message_body": message},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("recognized"):
+                    return data.get("response", "")
+    except Exception as exc:
+        logger.warning(f"WBOM self-service call failed: {exc}")
+    return None
+
+
+def _format_wbom_response(raw: str, intent: str) -> str:
+    """Normalise WBOM reply into a consistently structured message."""
+    if not raw or not raw.strip():
+        return "আপনার তথ্য প্রক্রিয়া হয়েছে।"
+    # Strip excessive whitespace / double newlines from WBOM
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    return "\n".join(lines)
 
 
 # ── FIX 3: Identity hard override — instant answers, no LLM needed ──
@@ -983,6 +1016,7 @@ class ChatRequest(BaseModel):
     user_id: Optional[str] = None
     user_name: Optional[str] = None
     relationship: Optional[str] = None
+    sender_role: Optional[str] = None  # owner/employee/client/job_seeker/social_unknown
     context: Optional[str] = None
     ack_sent: bool = False  # True when caller already sent an instant ACK (e.g. WhatsApp)
 
@@ -1010,23 +1044,55 @@ async def chat(request: ChatRequest):
         }
 
     # ── Phase 3: Full Intent Detection System (social only) ──
-    # 8-step flow: classify → intent match → negative filter → context → reply
+    # ── Phase 3: Unified Control Layer (social messages) ──
+    # Single decision engine: rate-limit → context → intent → role-route → respond
     if relationship == "social":
-        intent_reply = process_social_intent(request.message, conversation_id)
-        if intent_reply:
-            # ── Lead Capture ──
-            intent_state = _get_intent_state(conversation_id)
-            matched_intent = intent_state.get("last_intent")
-            intent_reply = await try_capture_lead(
-                request.message, matched_intent, conversation_id, intent_reply,
+        sender_role = request.sender_role or "social_unknown"
+        try:
+            ctrl_msg = IncomingMessage(
+                user_id=request.user_id or "",
+                message=request.message,
+                sender_role=sender_role,
+                phone=request.user_id or "",
+                source="whatsapp",
+                conversation_id=conversation_id,
+                context=request.context or "",
             )
-            logger.info(f"Intent engine → {intent_reply[:50]} for: {request.message[:60]}")
+            ctrl_result = await control_process_message(
+                ctrl_msg,
+                wbom_url=settings.wbom_url,
+                intent_fn=process_social_intent_scored,
+                lead_capture_fn=try_capture_lead,
+            )
+            control_log_result(ctrl_msg, ctrl_result)
+
+            # Owner passthrough → delegate to existing /chat/owner logic
+            if ctrl_result.route == "owner_passthrough" and not ctrl_result.reply:
+                pass  # fall through to LLM pipeline below
+            else:
+                return {
+                    "reply": ctrl_result.reply,
+                    "conversation_id": conversation_id,
+                    "memory_updates": [],
+                    "route": ctrl_result.route,
+                    "intent": ctrl_result.intent,
+                    "confidence": ctrl_result.confidence,
+                    "sender_role": ctrl_result.sender_role,
+                    "secondary_intents": ctrl_result.secondary_intents,
+                    "needs_clarification": ctrl_result.needs_clarification,
+                    "reason": ctrl_result.reason,
+                    "status": ctrl_result.status,
+                    "presence": {"typing_delay_ms": 200, "response_delay_ms": 100, "tone_energy": "medium"},
+                }
+        except Exception as exc:
+            logger.error(f"Control layer error: {exc}", exc_info=True)
             return {
-                "reply": intent_reply,
+                "reply": "দুঃখিত, সাময়িক সমস্যা হচ্ছে। আবার চেষ্টা করুন।",
                 "conversation_id": conversation_id,
                 "memory_updates": [],
-                "route": "intent_engine",
-                "presence": {"typing_delay_ms": 200, "response_delay_ms": 100, "tone_energy": "medium"},
+                "route": "control_layer_error",
+                "status": "error",
+                "presence": {"typing_delay_ms": 0, "response_delay_ms": 0, "tone_energy": "low"},
             }
 
     # Cache LLM reply for non-social repeated queries

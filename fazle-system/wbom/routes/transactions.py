@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 from datetime import date
 
-from database import insert_row, get_row, delete_row, list_rows, execute_query
+from database import insert_row, insert_row_dedup, get_row, delete_row, list_rows, execute_query, audit_log
 from models import TransactionCreate, TransactionResponse
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
@@ -14,7 +14,25 @@ router = APIRouter(prefix="/transactions", tags=["transactions"])
 
 @router.post("", response_model=TransactionResponse, status_code=201)
 def create_transaction(data: TransactionCreate):
-    row = insert_row("wbom_cash_transactions", data.model_dump(exclude_none=True))
+    payload = data.model_dump(exclude_none=True)
+
+    # Idempotency: if key provided, use dedup insert
+    if data.idempotency_key:
+        row, is_new = insert_row_dedup(
+            "wbom_cash_transactions", payload, ["idempotency_key"],
+        )
+        if not is_new:
+            # Duplicate — return existing without creating a new one
+            audit_log("transaction.duplicate_blocked", actor=data.created_by or "system",
+                      entity_type="transaction", payload={"idempotency_key": data.idempotency_key})
+            return row
+    else:
+        row = insert_row("wbom_cash_transactions", payload)
+
+    audit_log("transaction.created", actor=data.created_by or "system",
+              entity_type="transaction", entity_id=row.get("transaction_id"),
+              payload={"amount": str(data.amount), "type": data.transaction_type,
+                       "employee_id": data.employee_id, "source": data.source})
     return row
 
 
@@ -91,10 +109,37 @@ def get_transaction(transaction_id: int):
     return row
 
 
+@router.put("/{transaction_id}")
+def update_transaction_status(
+    transaction_id: int,
+    status: str = Query(..., pattern=r"^(Pending|Completed|Failed)$"),
+    approved_by: Optional[str] = None,
+):
+    """Update transaction status (Pending → Completed or Failed)."""
+    from database import update_row_no_ts
+    update_data: dict = {"status": status}
+    if approved_by:
+        from datetime import datetime as _dt
+        update_data["approved_by"] = approved_by
+        update_data["approved_at"] = _dt.now().isoformat()
+    row = update_row_no_ts("wbom_cash_transactions", "transaction_id", transaction_id, update_data)
+    if not row:
+        raise HTTPException(404, "Transaction not found")
+    audit_log("transaction.status_updated", actor=approved_by or "system",
+              entity_type="transaction", entity_id=transaction_id,
+              payload={"new_status": status})
+    return row
+
+
 @router.delete("/{transaction_id}")
 def remove_transaction(transaction_id: int):
+    existing = get_row("wbom_cash_transactions", "transaction_id", transaction_id)
+    if not existing:
+        raise HTTPException(404, "Transaction not found")
     if not delete_row("wbom_cash_transactions", "transaction_id", transaction_id):
         raise HTTPException(404, "Transaction not found")
+    audit_log("transaction.deleted", entity_type="transaction", entity_id=transaction_id,
+              payload={"amount": str(existing.get("amount", 0)), "employee_id": existing.get("employee_id")})
     return {"deleted": True}
 
 

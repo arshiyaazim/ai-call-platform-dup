@@ -166,6 +166,9 @@ class TransactionCreate(BaseModel):
     reference_number: Optional[str] = Field(None, max_length=50)
     remarks: Optional[str] = None
     created_by: Optional[str] = Field(None, max_length=50)
+    idempotency_key: Optional[str] = Field(None, max_length=64)
+    source: Optional[str] = Field(default="web", max_length=30)
+    status: Optional[str] = Field(default="Completed", pattern=r"^(Pending|Completed|Failed)$")
 
 
 class TransactionResponse(BaseModel):
@@ -183,6 +186,10 @@ class TransactionResponse(BaseModel):
     remarks: Optional[str] = None
     whatsapp_message_id: Optional[str] = None
     created_by: Optional[str] = None
+    idempotency_key: Optional[str] = None
+    source: Optional[str] = None
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
 
 
 # ── Billing ───────────────────────────────────────────────────
@@ -660,4 +667,109 @@ class EmployeeRequestResponse(BaseModel):
     status: str
     response_text: Optional[str] = None
     delay_hours: int = 0
+    created_at: datetime
+
+
+# ── Job Applications ──────────────────────────────────────────
+
+class JobApplicationCreate(BaseModel):
+    applicant_name: str = Field(..., max_length=100)
+    phone: str = Field(..., max_length=20)
+    position: Optional[str] = Field(None, max_length=80)
+    experience: Optional[str] = None
+    notes: Optional[str] = None
+    source: str = Field(default="whatsapp", max_length=30)
+
+
+class JobApplicationUpdate(BaseModel):
+    status: Optional[str] = Field(None, pattern=r"^(Applied|Screened|Interviewed|Hired|Rejected)$")
+    position: Optional[str] = Field(None, max_length=80)
+    experience: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class JobApplicationResponse(BaseModel):
+    application_id: int
+    applicant_name: str
+    phone: str
+    position: Optional[str] = None
+    experience: Optional[str] = None
+    status: str = "Applied"
+    notes: Optional[str] = None
+    source: str = "whatsapp"
+    created_at: datetime
+    updated_at: datetime
+
+
+# ── Clients ───────────────────────────────────────────────────
+
+class ClientCreate(BaseModel):
+    name: str = Field(..., max_length=100)
+    phone: Optional[str] = Field(None, max_length=20)
+    company_name: Optional[str] = Field(None, max_length=150)
+    client_type: str = Field(default="Standard", pattern=r"^(Standard|VIP|Corporate)$")
+    outstanding_balance: Optional[Decimal] = Field(default=Decimal("0"))
+    credit_terms: Optional[str] = Field(None, max_length=100)
+    notes: Optional[str] = None
+
+
+class ClientUpdate(BaseModel):
+    name: Optional[str] = Field(None, max_length=100)
+    phone: Optional[str] = Field(None, max_length=20)
+    company_name: Optional[str] = Field(None, max_length=150)
+    client_type: Optional[str] = Field(None, pattern=r"^(Standard|VIP|Corporate)$")
+    outstanding_balance: Optional[Decimal] = None
+    credit_terms: Optional[str] = Field(None, max_length=100)
+    notes: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class ClientResponse(BaseModel):
+    client_id: int
+    name: str
+    phone: Optional[str] = None
+    company_name: Optional[str] = None
+    client_type: str = "Standard"
+    outstanding_balance: Optional[Decimal] = Decimal("0")
+    credit_terms: Optional[str] = None
+    notes: Optional[str] = None
+    is_active: bool = True
+    created_at: datetime
+    updated_at: datetime
+
+
+# ── Payment Approval (staging → execute) ──────────────────────
+
+class PaymentInitiateRequest(BaseModel):
+    """Owner or system initiates a payment (goes to staging first)."""
+    employee_id: int
+    amount: Decimal = Field(..., gt=0)
+    transaction_type: str = Field(default="Advance", pattern=r"^(Advance|Food|Conveyance|Salary|Deduction|Other)$")
+    payment_method: str = Field(default="Bkash", pattern=r"^(Cash|Bkash|Nagad|Rocket|Bank)$")
+    remarks: Optional[str] = None
+    source: str = Field(default="whatsapp", max_length=30)
+    idempotency_key: Optional[str] = Field(None, max_length=64)
+
+
+class PaymentApproveRequest(BaseModel):
+    staging_id: int
+    approved_by: str = Field(..., max_length=80)
+
+
+class PaymentExecuteResponse(BaseModel):
+    staging_id: int
+    transaction_id: Optional[int] = None
+    status: str   # approved | executed | failed | duplicate
+    message: str
+
+
+# ── Audit Log (read-only) ────────────────────────────────────
+
+class AuditLogResponse(BaseModel):
+    audit_id: int
+    event: str
+    actor: str
+    entity_type: Optional[str] = None
+    entity_id: Optional[int] = None
+    payload: Optional[dict] = None
     created_at: datetime

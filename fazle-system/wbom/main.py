@@ -28,6 +28,10 @@ from routes.reports import router as reports_router
 from routes.attendance import router as attendance_router
 from routes.admin import router as admin_router
 from routes.self_service import router as self_service_router
+from routes.payment import router as payment_router
+from routes.job_applications import router as job_applications_router
+from routes.clients import router as clients_router
+from routes.audit import router as audit_router
 
 # ---- logging ------------------------------------------------
 from structured_log import setup_structured_logging
@@ -117,6 +121,10 @@ app.include_router(reports_router, prefix="/api/wbom")
 app.include_router(attendance_router, prefix="/api/wbom")
 app.include_router(admin_router, prefix="/api/wbom")
 app.include_router(self_service_router, prefix="/api/wbom")
+app.include_router(payment_router, prefix="/api/wbom")
+app.include_router(job_applications_router, prefix="/api/wbom")
+app.include_router(clients_router, prefix="/api/wbom")
+app.include_router(audit_router, prefix="/api/wbom")
 
 
 # ---- health --------------------------------------------------

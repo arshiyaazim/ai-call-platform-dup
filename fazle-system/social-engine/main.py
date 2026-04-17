@@ -318,11 +318,32 @@ def upsert_contact(db_conn_fn, phone: str, name: str = "", platform: str = "what
                 (norm_phone, name, relation, platform, notes, company, personality_hint),
             )
         conn.commit()
+    # Invalidate Redis cache for this contact
+    try:
+        from redis_dedup import _get_redis
+        r = _get_redis()
+        if r:
+            r.delete(f"fazle:contact:{platform}:{norm_phone}")
+    except Exception:
+        pass
 
 
 def get_contact(db_conn_fn, phone: str, platform: str = "whatsapp") -> dict | None:
-    """Retrieve contact info for prompt injection."""
+    """Retrieve contact info with Redis cache (TTL 120s)."""
     norm_phone = phone.lstrip("+").replace(" ", "").strip()
+    cache_key = f"fazle:contact:{platform}:{norm_phone}"
+
+    # Try Redis cache first
+    try:
+        from redis_dedup import _get_redis
+        r = _get_redis()
+        if r:
+            cached = r.get(cache_key)
+            if cached:
+                return json.loads(cached)
+    except Exception:
+        pass  # Fall through to DB
+
     with db_conn_fn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -333,7 +354,26 @@ def get_contact(db_conn_fn, phone: str, platform: str = "whatsapp") -> dict | No
                 (norm_phone, platform),
             )
             row = cur.fetchone()
-            return dict(row) if row else None
+            result = dict(row) if row else None
+
+    # Cache in Redis (120s TTL)
+    if result:
+        try:
+            from redis_dedup import _get_redis
+            r = _get_redis()
+            if r:
+                # Convert datetimes to strings for JSON serialization
+                cacheable = {}
+                for k, v in result.items():
+                    if hasattr(v, "isoformat"):
+                        cacheable[k] = v.isoformat()
+                    else:
+                        cacheable[k] = v
+                r.set(cache_key, json.dumps(cacheable), ex=120)
+        except Exception:
+            pass
+
+    return result
 
 
 def list_all_contacts(db_conn_fn, platform: str | None = None, search: str = "",

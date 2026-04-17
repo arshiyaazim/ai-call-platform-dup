@@ -1069,158 +1069,192 @@ async def handle_whatsapp_webhook(
             continue
 
         # ── INSTANT ACK + DELAYED FINAL RESPONSE ──
-        # Step 0: Upsert contact in contact book + fetch contact data
-        contact_data = None
+        # ALWAYS-REPLY GUARANTEE: wrap entire processing in try/except
+        _reply_sent_this_message = False
         try:
-            from main import upsert_contact, get_contact
-            upsert_contact(db_conn_fn, msg["sender_id"], msg["sender_name"] or "", "whatsapp")
-            contact_data = get_contact(db_conn_fn, msg["sender_id"], "whatsapp")
-        except Exception as e:
-            logger.warning(f"Contact upsert/fetch failed: {e}")
-
-        # Determine if this is a priority contact (VIP/client get faster processing)
-        is_priority = False
-        contact_relation = ""
-        if contact_data:
-            contact_relation = (contact_data.get("relation") or "unknown").lower()
-            is_priority = contact_relation in ("vip", "client")
-
-        # ── PHASE 4 FIX: AI generates reply only — NEVER auto-send ──
-        # Step 1: Check reply reuse cache BEFORE calling LLM
-        cached_reply = None
-        if not is_priority:
+            # Step 0: Upsert contact in contact book + fetch contact data
+            contact_data = None
             try:
-                from main import find_cached_reply
-                cached_reply = find_cached_reply(db_conn_fn, msg["text"], "whatsapp")
-                if cached_reply:
-                    logger.info(f"Reply reuse hit for {msg['sender_id']} — using cached")
+                from main import upsert_contact, get_contact
+                upsert_contact(db_conn_fn, msg["sender_id"], msg["sender_name"] or "", "whatsapp")
+                contact_data = get_contact(db_conn_fn, msg["sender_id"], "whatsapp")
             except Exception as e:
-                logger.debug(f"Reply cache check failed: {e}")
+                logger.warning(f"Contact upsert/fetch failed: {e}")
 
-        ai_reply = cached_reply
-
-        if not ai_reply:
-            # Step 2: Call brain for AI response — NO send
-            if _is_sender_locked(msg["sender_id"]):
-                logger.info(f"Rate-limit: sender {msg['sender_id']} still in cooldown — skipping")
-                processed += 1
-                continue
-            _lock_sender(msg["sender_id"])
-
-            brain_context = ""
+            # Determine if this is a priority contact (VIP/client get faster processing)
+            is_priority = False
+            contact_relation = ""
             if contact_data:
-                brain_context += f"Contact: {contact_data.get('name', '')} ({contact_relation})"
-                if contact_data.get("company"):
-                    brain_context += f" from {contact_data['company']}"
-                if contact_data.get("personality_hint"):
-                    brain_context += f". Hint: {contact_data['personality_hint']}"
-                brain_context += "\n"
+                contact_relation = (contact_data.get("relation") or "unknown").lower()
+                is_priority = contact_relation in ("vip", "client")
 
-            ai_reply = await _call_brain(
-                brain_url, msg["text"], "whatsapp", msg["sender_name"],
-                sender_id=msg["sender_id"], ack_sent=False,
-                context=brain_context if brain_context else "",
-            )
-            _unlock_sender(msg["sender_id"])
+            # ── PHASE 4 FIX: AI generates reply only — NEVER auto-send ──
+            # Step 1: Check reply reuse cache BEFORE calling LLM
+            cached_reply = None
+            if not is_priority:
+                try:
+                    from main import find_cached_reply
+                    cached_reply = find_cached_reply(db_conn_fn, msg["text"], "whatsapp")
+                    if cached_reply:
+                        logger.info(f"Reply reuse hit for {msg['sender_id']} — using cached")
+                except Exception as e:
+                    logger.debug(f"Reply cache check failed: {e}")
 
-            if not ai_reply or not ai_reply.strip():
-                ai_reply = "দুঃখিত, একটু সমস্যা হয়েছে। আবার বলবেন?"
-                logger.warning(f"Brain returned empty for {msg['sender_id']} — using fallback")
-                push_to_dlq(
-                    {"sender_id": msg["sender_id"], "text": msg["text"], "message_id": msg_id},
-                    "brain_returned_empty",
-                    platform="whatsapp",
+            ai_reply = cached_reply
+
+            if not ai_reply:
+                # Step 2: Call brain for AI response — NO send
+                if _is_sender_locked(msg["sender_id"]):
+                    logger.info(f"Rate-limit: sender {msg['sender_id']} still in cooldown — skipping")
+                    processed += 1
+                    continue
+                _lock_sender(msg["sender_id"])
+
+                brain_context = ""
+                if contact_data:
+                    brain_context += f"Contact: {contact_data.get('name', '')} ({contact_relation})"
+                    if contact_data.get("company"):
+                        brain_context += f" from {contact_data['company']}"
+                    if contact_data.get("personality_hint"):
+                        brain_context += f". Hint: {contact_data['personality_hint']}"
+                    brain_context += "\n"
+
+                ai_reply = await _call_brain(
+                    brain_url, msg["text"], "whatsapp", msg["sender_name"],
+                    sender_id=msg["sender_id"], ack_sent=False,
+                    context=brain_context if brain_context else "",
+                    sender_role=contact_relation or "social_unknown",
                 )
+                _unlock_sender(msg["sender_id"])
 
-        # Save reply for future reuse
-        try:
-            from main import save_chat_reply
-            save_chat_reply(db_conn_fn, msg["text"], ai_reply,
-                            category=contact_relation or "unknown",
-                            platform="whatsapp", source="llm")
-        except Exception as e:
-            logger.debug(f"Reply cache save failed: {e}")
-
-        # Step 3: Safety-classified routing — auto-send safe replies, draft restricted ones
-        safety = _classify_reply_safety(msg["text"], ai_reply, contact_relation)
-        contact_display = msg.get("sender_name") or msg["sender_id"]
-
-        if safety == "safe":
-            # AUTO-SEND: reply is safe (job inquiry, greeting, service info, etc.)
-            creds = get_creds_fn("whatsapp")
-            send_status = "failed"
-            if creds:
-                from whatsapp import send_message
-                result = await send_message(
-                    creds.get("whatsapp_api_url", ""),
-                    creds.get("access_token", ""),
-                    creds.get("phone_number_id", ""),
-                    msg["sender_id"],
-                    ai_reply,
-                )
-                send_status = "sent" if result.get("sent") else "failed"
-            with db_conn_fn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """INSERT INTO fazle_social_messages
-                           (platform, direction, contact_identifier, content, metadata, status)
-                           VALUES ('whatsapp', 'outgoing', %s, %s, %s, %s)""",
-                        (msg["sender_id"], ai_reply,
-                         psycopg2.extras.Json({
-                             "source": "ai_auto",
-                             "safety": "safe",
-                             "relation": contact_relation,
-                             "customer_message": msg["text"][:500],
-                         }),
-                         send_status),
+                if not ai_reply or not ai_reply.strip():
+                    ai_reply = "দুঃখিত, একটু সমস্যা হয়েছে। আবার বলবেন?"
+                    logger.warning(f"Brain returned empty for {msg['sender_id']} — using fallback")
+                    push_to_dlq(
+                        {"sender_id": msg["sender_id"], "text": msg["text"], "message_id": msg_id},
+                        "brain_returned_empty",
+                        platform="whatsapp",
                     )
-                conn.commit()
-            logger.info(f"Auto-sent safe reply to {msg['sender_id']} ({contact_relation})")
-        else:
-            # DRAFT: reply contains restricted content — needs owner approval
-            with db_conn_fn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """INSERT INTO fazle_social_messages
-                           (platform, direction, contact_identifier, content, metadata, status)
-                           VALUES ('whatsapp', 'outgoing', %s, %s, %s, 'draft')""",
-                        (msg["sender_id"], ai_reply,
-                         psycopg2.extras.Json({
-                             "source": "ai_draft",
-                             "safety": "restricted",
-                             "relation": contact_relation,
-                             "customer_message": msg["text"][:500],
-                             "customer_name": contact_display,
-                             "awaiting_approval": True,
-                         })),
-                    )
-                conn.commit()
 
-            # Notify owner about the pending draft
-            if owner_phone:
-                owner_notification = (
-                    f"📩 *{contact_display}* ({msg['sender_id']}):\n"
-                    f"{msg['text'][:300]}\n\n"
-                    f"🤖 AI suggests:\n{ai_reply[:500]}\n\n"
-                    f"✅ Reply *send* to approve\n"
-                    f"✏️ Or type your own reply"
-                )
+            # Save reply for future reuse
+            try:
+                from main import save_chat_reply
+                save_chat_reply(db_conn_fn, msg["text"], ai_reply,
+                                category=contact_relation or "unknown",
+                                platform="whatsapp", source="llm")
+            except Exception as e:
+                logger.debug(f"Reply cache save failed: {e}")
+
+            # Step 3: Safety-classified routing — auto-send safe replies, draft restricted ones
+            safety = _classify_reply_safety(msg["text"], ai_reply, contact_relation)
+            contact_display = msg.get("sender_name") or msg["sender_id"]
+
+            if safety == "safe":
+                # AUTO-SEND: reply is safe (job inquiry, greeting, service info, etc.)
                 creds = get_creds_fn("whatsapp")
+                send_status = "failed"
                 if creds:
                     from whatsapp import send_message
-                    await send_message(
+                    result = await send_message(
                         creds.get("whatsapp_api_url", ""),
                         creds.get("access_token", ""),
                         creds.get("phone_number_id", ""),
-                        owner_phone,
-                        owner_notification,
+                        msg["sender_id"],
+                        ai_reply,
                     )
-                    logger.info(f"Draft notification sent to owner for {msg['sender_id']}")
+                    send_status = "sent" if result.get("sent") else "failed"
+                with db_conn_fn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """INSERT INTO fazle_social_messages
+                               (platform, direction, contact_identifier, content, metadata, status)
+                               VALUES ('whatsapp', 'outgoing', %s, %s, %s, %s)""",
+                            (msg["sender_id"], ai_reply,
+                             psycopg2.extras.Json({
+                                 "source": "ai_auto",
+                                 "safety": "safe",
+                                 "relation": contact_relation,
+                                 "customer_message": msg["text"][:500],
+                             }),
+                             send_status),
+                        )
+                    conn.commit()
+                logger.info(f"Auto-sent safe reply to {msg['sender_id']} ({contact_relation})")
+                _reply_sent_this_message = True
+            else:
+                # DRAFT: reply contains restricted content — needs owner approval
+                with db_conn_fn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """INSERT INTO fazle_social_messages
+                               (platform, direction, contact_identifier, content, metadata, status)
+                               VALUES ('whatsapp', 'outgoing', %s, %s, %s, 'draft')""",
+                            (msg["sender_id"], ai_reply,
+                             psycopg2.extras.Json({
+                                 "source": "ai_draft",
+                                 "safety": "restricted",
+                                 "relation": contact_relation,
+                                 "customer_message": msg["text"][:500],
+                                 "customer_name": contact_display,
+                                 "awaiting_approval": True,
+                             })),
+                        )
+                    conn.commit()
 
-        try:
-            _auto_update_interest(db_conn_fn, msg["sender_id"], "whatsapp", msg["text"])
-        except Exception:
-            pass
+                # Notify owner about the pending draft
+                if owner_phone:
+                    owner_notification = (
+                        f"📩 *{contact_display}* ({msg['sender_id']}):\n"
+                        f"{msg['text'][:300]}\n\n"
+                        f"🤖 AI suggests:\n{ai_reply[:500]}\n\n"
+                        f"✅ Reply *send* to approve\n"
+                        f"✏️ Or type your own reply"
+                    )
+                    creds = get_creds_fn("whatsapp")
+                    if creds:
+                        from whatsapp import send_message
+                        await send_message(
+                            creds.get("whatsapp_api_url", ""),
+                            creds.get("access_token", ""),
+                            creds.get("phone_number_id", ""),
+                            owner_phone,
+                            owner_notification,
+                        )
+                        logger.info(f"Draft notification sent to owner for {msg['sender_id']}")
+                _reply_sent_this_message = True  # draft stored = reply handled
+
+                try:
+                    _auto_update_interest(db_conn_fn, msg["sender_id"], "whatsapp", msg["text"])
+                except Exception:
+                    pass
+
+        except Exception as exc:
+            # ── ALWAYS-REPLY GUARANTEE ──
+            # If ANY part of processing failed, send a safe fallback reply
+            logger.error(f"Non-owner processing failed for {msg.get('sender_id', '?')}: {exc}", exc_info=True)
+            if not _reply_sent_this_message:
+                _fallback_reply = "দুঃখিত, সাময়িক সমস্যা হয়েছে। একটু পরে আবার চেষ্টা করুন।"
+                try:
+                    creds = get_creds_fn("whatsapp")
+                    if creds:
+                        from whatsapp import send_message
+                        await send_message(
+                            creds.get("whatsapp_api_url", ""),
+                            creds.get("access_token", ""),
+                            creds.get("phone_number_id", ""),
+                            msg["sender_id"],
+                            _fallback_reply,
+                        )
+                    logger.info(f"Always-reply fallback sent to {msg['sender_id']}")
+                except Exception as send_exc:
+                    logger.error(f"CRITICAL: Even fallback reply failed for {msg['sender_id']}: {send_exc}")
+                push_to_dlq(
+                    {"sender_id": msg["sender_id"], "text": msg.get("text", ""), "message_id": msg_id,
+                     "error": str(exc)},
+                    "processing_exception",
+                    platform="whatsapp",
+                )
+
         processed += 1
 
     return {"processed": processed, "total_messages": len(messages)}
@@ -1309,7 +1343,7 @@ async def _call_brain_owner(brain_url: str, message: str, platform: str,
 
 async def _call_brain(brain_url: str, message: str, platform: str,
                       sender: str, sender_id: str = "", context: str = "",
-                      ack_sent: bool = False) -> str:
+                      ack_sent: bool = False, sender_role: str = "") -> str:
     """Call Fazle Brain API to generate a persona-aware response.
     Uses stable conversation_id per user (platform:sender_id) for continuity."""
     try:
@@ -1319,10 +1353,13 @@ async def _call_brain(brain_url: str, message: str, platform: str,
         payload = {
             "message": message,
             "user": sender or "Social Bot",
+            "user_id": sender_id or "",
             "relationship": "social",
             "conversation_id": f"social-{platform}-{stable_id}",
             "ack_sent": ack_sent,
         }
+        if sender_role:
+            payload["sender_role"] = sender_role
         if context:
             payload["context"] = context
         else:

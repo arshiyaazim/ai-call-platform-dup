@@ -126,6 +126,42 @@ def ensure_wbom_tables():
         except Exception as e:
             logger.warning("Migration %s failed (may already be applied): %s", label, e)
 
+    # 015: Production hardening (audit_logs, job_applications, clients, idempotency)
+    try:
+        import pathlib
+        _mig_015 = pathlib.Path(__file__).parent / "migrations" / "015_production_hardening.sql"
+        if _mig_015.exists():
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(_mig_015.read_text())
+                conn.commit()
+            logger.info("Applied migration 015_production_hardening")
+    except Exception as e:
+        logger.warning("Migration 015 failed (may already be applied): %s", e)
+
+
+# ── Audit helper ─────────────────────────────────────────────
+
+def audit_log(event: str, actor: str = "system", entity_type: str | None = None,
+              entity_id: int | None = None, payload: dict | None = None,
+              ip_address: str | None = None):
+    """Append a row to wbom_audit_logs. Non-blocking — failures are logged."""
+    try:
+        import json as _json
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO wbom_audit_logs
+                       (event, actor, entity_type, entity_id, payload, ip_address)
+                       VALUES (%s, %s, %s, %s, %s, %s)""",
+                    (event, actor, entity_type, entity_id,
+                     _json.dumps(payload or {}, default=str),
+                     ip_address),
+                )
+            conn.commit()
+    except Exception as exc:
+        logger.warning("audit_log write failed: %s", exc)
+
 
 # ── Generic CRUD helpers ─────────────────────────────────────
 
