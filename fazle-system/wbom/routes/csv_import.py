@@ -252,7 +252,7 @@ def _clean_row(raw_row: dict, col_meta: dict, pk: str) -> Optional[dict]:
 
         if val == "" or val.upper() == "NUL":
             if _is_numeric_type(dtype):
-                cleaned[col] = 0
+                cleaned[col] = None if nullable else 0
             elif nullable:
                 cleaned[col] = None
             else:
