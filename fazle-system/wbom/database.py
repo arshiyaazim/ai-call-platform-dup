@@ -152,6 +152,19 @@ def ensure_wbom_tables():
     except Exception as e:
         logger.warning("Migration 016 failed (may already be applied): %s", e)
 
+    # 017: Master identity & message history unification
+    try:
+        import pathlib
+        _mig_017 = pathlib.Path(__file__).parent / "migrations" / "017_master_identity.sql"
+        if _mig_017.exists():
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(_mig_017.read_text())
+                conn.commit()
+            logger.info("Applied migration 017_master_identity")
+    except Exception as e:
+        logger.warning("Migration 017 failed (may already be applied): %s", e)
+
 
 # ── Audit helper ─────────────────────────────────────────────
 

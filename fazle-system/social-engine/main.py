@@ -27,6 +27,12 @@ from tasks import trigger_workflow, check_keyword_rules
 import whatsapp as wa_module
 import facebook as fb_module
 
+# Shared utilities — phone normalization
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "shared"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared"))
+from phone_utils import normalize_phone as _normalize_phone_shared
+
 from structured_log import setup_structured_logging
 setup_structured_logging("fazle-social-engine")
 logger = logging.getLogger("fazle-social-engine")
@@ -244,7 +250,7 @@ def upsert_contact(db_conn_fn, phone: str, name: str = "", platform: str = "what
                    relation: str = "unknown", notes: str = "",
                    company: str = "", personality_hint: str = "") -> None:
     """Create or update a contact in the contact book (wbom_contacts)."""
-    norm_phone = phone.lstrip("+").replace(" ", "").strip()
+    norm_phone = _normalize_phone_shared(phone) or phone.lstrip("+").replace(" ", "").strip()
     with db_conn_fn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -274,7 +280,7 @@ def upsert_contact(db_conn_fn, phone: str, name: str = "", platform: str = "what
 
 def get_contact(db_conn_fn, phone: str, platform: str = "whatsapp") -> dict | None:
     """Retrieve contact info with Redis cache (TTL 120s)."""
-    norm_phone = phone.lstrip("+").replace(" ", "").strip()
+    norm_phone = _normalize_phone_shared(phone) or phone.lstrip("+").replace(" ", "").strip()
     cache_key = f"fazle:contact:{platform}:{norm_phone}"
 
     # Try Redis cache first

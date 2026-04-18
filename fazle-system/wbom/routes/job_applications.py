@@ -7,8 +7,6 @@ from typing import Optional
 
 from database import insert_row, get_row, update_row, delete_row, list_rows, audit_log, count_rows
 from models import JobApplicationCreate, JobApplicationUpdate, JobApplicationResponse
-from response import api_response, api_single
-from openapi_models import ApplicationListResponse, SingleEnvelope
 
 router = APIRouter(prefix="/job-applications", tags=["job_applications"])
 
@@ -19,10 +17,10 @@ def create_application(data: JobApplicationCreate):
     audit_log("job_application.created", actor=data.source or "system",
               entity_type="job_application", entity_id=row.get("application_id"),
               payload={"applicant": data.applicant_name, "position": data.position})
-    return api_single(row, entity="applications")
+    return row
 
 
-@router.get("", response_model=ApplicationListResponse)
+@router.get("")
 def list_applications(
     status: Optional[str] = None,
     position: Optional[str] = None,
@@ -36,7 +34,7 @@ def list_applications(
         filters["position"] = position
     rows = list_rows("wbom_job_applications", filters=filters, limit=limit, offset=offset)
     total = count_rows("wbom_job_applications", filters if filters else None)
-    return api_response(rows, entity="applications", total=total)
+    return rows
 
 
 @router.get("/{application_id}")
@@ -44,7 +42,7 @@ def get_application(application_id: int):
     row = get_row("wbom_job_applications", "application_id", application_id)
     if not row:
         raise HTTPException(404, "Application not found")
-    return api_single(row, entity="applications")
+    return row
 
 
 @router.put("/{application_id}")
@@ -57,7 +55,7 @@ def update_application(application_id: int, data: JobApplicationUpdate):
         raise HTTPException(404, "Application not found")
     audit_log("job_application.updated", entity_type="job_application",
               entity_id=application_id, payload=updates)
-    return api_single(row, entity="applications")
+    return row
 
 
 @router.delete("/{application_id}")

@@ -7,10 +7,11 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Depends
 from pydantic import BaseModel
 
 from database import _get_conn
+from auth import require_admin
 
 logger = logging.getLogger("fazle-api.leads")
 
@@ -77,6 +78,7 @@ def capture_lead(lead: LeadIn):
 def list_leads(
     limit: int = Query(50, ge=1, le=500),
     status: Optional[str] = Query(None),
+    _user=Depends(require_admin),
 ):
     """Return recent leads ordered by newest first."""
     with _get_conn() as conn:

@@ -193,6 +193,46 @@ export interface FuzzySearchResult {
 // The WBOM API base path (proxied through Next.js rewrite → nginx → WBOM:9900)
 const W = '/wbom';
 
+// ── Master Contact types ─────────────────────────────────────
+
+export interface MasterContact {
+  id: number;
+  canonical_phone: string;
+  display_name: string;
+  role: string;
+  sub_role: string;
+  source: string;
+  is_whatsapp: boolean;
+  employee_id?: number;
+  metadata?: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MessageHistoryItem {
+  id: number;
+  canonical_phone: string;
+  platform: string;
+  direction: string;
+  message_text: string;
+  wa_message_id?: string;
+  role_snapshot: string;
+  created_at: string;
+  display_name?: string;
+  role?: string;
+}
+
+export interface RoleCount {
+  role: string;
+  count: number;
+}
+
+export interface UnifiedSearchResult {
+  contacts: MasterContact[];
+  employees: WbomEmployee[];
+  messages: MessageHistoryItem[];
+}
+
 // ── Service ──────────────────────────────────────────────────
 
 export const wbomService = {
@@ -347,4 +387,54 @@ export const wbomService = {
     apiGet<WbomEmployeeRequest[]>(`${W}/self-service/requests?limit=${limit}`),
   respondToRequest: (requestId: number, response_text: string, status = 'Responded') =>
     apiPost<{ success: boolean }>(`${W}/self-service/requests/${requestId}/respond?response_text=${encodeURIComponent(response_text)}&status=${status}`, {}),
+
+  // ── Master Contacts ──
+  listMasterContacts: (params?: { role?: string; search?: string; limit?: number; offset?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.role) q.set('role', params.role);
+    if (params?.search) q.set('search', params.search);
+    if (params?.limit) q.set('limit', String(params.limit));
+    if (params?.offset) q.set('offset', String(params.offset));
+    const qs = q.toString();
+    return apiGet<MasterContact[]>(`${W}/master/contacts${qs ? '?' + qs : ''}`);
+  },
+  countMasterContacts: (params?: { role?: string; search?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.role) q.set('role', params.role);
+    if (params?.search) q.set('search', params.search);
+    const qs = q.toString();
+    return apiGet<CountResult>(`${W}/master/contacts/count${qs ? '?' + qs : ''}`);
+  },
+  getMasterContact: (phone: string) =>
+    apiGet<MasterContact>(`${W}/master/contacts/${encodeURIComponent(phone)}`),
+  updateMasterContact: (phone: string, data: Partial<MasterContact>) =>
+    apiPut<MasterContact>(`${W}/master/contacts/${encodeURIComponent(phone)}`, data),
+  createMasterContact: (data: { phone: string; display_name?: string; role?: string; sub_role?: string; source?: string; is_whatsapp?: boolean }) =>
+    apiPost<MasterContact>(`${W}/master/contacts`, data),
+  setContactRole: (phone: string, role: string) =>
+    apiPut<MasterContact>(`${W}/master/contacts/${encodeURIComponent(phone)}/role?role=${encodeURIComponent(role)}`, {}),
+
+  // ── Roles ──
+  listRoles: () => apiGet<RoleCount[]>(`${W}/master/roles`),
+
+  // ── Message History ──
+  getMessageHistory: (phone: string, params?: { limit?: number; offset?: number; platform?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.limit) q.set('limit', String(params.limit));
+    if (params?.offset) q.set('offset', String(params.offset));
+    if (params?.platform) q.set('platform', params.platform);
+    const qs = q.toString();
+    return apiGet<{ messages: MessageHistoryItem[]; total: number; phone: string }>(`${W}/master/messages/${encodeURIComponent(phone)}${qs ? '?' + qs : ''}`);
+  },
+  listRecentMessages: (params?: { limit?: number; offset?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.limit) q.set('limit', String(params.limit));
+    if (params?.offset) q.set('offset', String(params.offset));
+    const qs = q.toString();
+    return apiGet<MessageHistoryItem[]>(`${W}/master/messages${qs ? '?' + qs : ''}`);
+  },
+
+  // ── Unified Search ──
+  unifiedSearch: (query: string, limit = 20) =>
+    apiGet<UnifiedSearchResult>(`${W}/master/search?q=${encodeURIComponent(query)}&limit=${limit}`),
 };

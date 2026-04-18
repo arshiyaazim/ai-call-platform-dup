@@ -878,7 +878,9 @@ services:
 
   # ── Fazle Social Engine — WhatsApp + Facebook Automation ──
   fazle-social-engine:
-    build: ../fazle-system/social-engine
+    build:
+      context: ../fazle-system
+      dockerfile: social-engine/Dockerfile
     container_name: fazle-social-engine
     restart: unless-stopped
     read_only: true
@@ -931,7 +933,9 @@ services:
 
   # ── Fazle WBOM — WhatsApp Business Operations Manager ──────
   fazle-wbom:
-    build: ../fazle-system/wbom
+    build:
+      context: ../fazle-system
+      dockerfile: wbom/Dockerfile
     container_name: fazle-wbom
     restart: unless-stopped
     read_only: true

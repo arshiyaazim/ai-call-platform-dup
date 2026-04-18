@@ -172,13 +172,11 @@ def execute_payment(staging_id: int, executed_by: str = Query("system")):
 @router.get("/pending")
 def list_pending(limit: int = Query(50, le=200)):
     """List all pending staging payments."""
-    from response import api_response
-    from openapi_models import PaymentListResponse
     rows = execute_query(
         "SELECT * FROM wbom_staging_payments WHERE status = 'pending' ORDER BY created_at DESC LIMIT %s",
         (limit,),
     )
-    return api_response(rows, entity="payments")
+    return rows
 
 
 @router.post("/reject/{staging_id}", response_model=PaymentExecuteResponse)

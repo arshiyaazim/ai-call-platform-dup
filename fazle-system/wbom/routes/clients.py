@@ -7,8 +7,6 @@ from typing import Optional
 
 from database import insert_row, get_row, update_row, delete_row, list_rows, audit_log, count_rows
 from models import ClientCreate, ClientUpdate, ClientResponse
-from response import api_response, api_single
-from openapi_models import ClientListResponse, SingleEnvelope
 
 router = APIRouter(prefix="/clients", tags=["clients"])
 
@@ -19,10 +17,10 @@ def create_client(data: ClientCreate):
     audit_log("client.created", entity_type="client",
               entity_id=row.get("client_id"),
               payload={"name": data.name, "type": data.client_type})
-    return api_single(row, entity="clients")
+    return row
 
 
-@router.get("", response_model=ClientListResponse)
+@router.get("")
 def list_clients(
     client_type: Optional[str] = None,
     is_active: Optional[bool] = None,
@@ -36,7 +34,7 @@ def list_clients(
         filters["is_active"] = is_active
     rows = list_rows("wbom_clients", filters=filters, limit=limit, offset=offset)
     total = count_rows("wbom_clients", filters if filters else None)
-    return api_response(rows, entity="clients", total=total)
+    return rows
 
 
 @router.get("/search")
@@ -46,7 +44,7 @@ def search_clients(q: str = Query(..., min_length=1), limit: int = Query(10, le=
         "SELECT * FROM wbom_clients WHERE name ILIKE %s OR company_name ILIKE %s OR phone ILIKE %s LIMIT %s",
         (f"%{q}%", f"%{q}%", f"%{q}%", limit),
     )
-    return api_response(rows, entity="clients")
+    return rows
 
 
 @router.get("/{client_id}")
@@ -54,7 +52,7 @@ def get_client(client_id: int):
     row = get_row("wbom_clients", "client_id", client_id)
     if not row:
         raise HTTPException(404, "Client not found")
-    return api_single(row, entity="clients")
+    return row
 
 
 @router.put("/{client_id}")
@@ -67,7 +65,7 @@ def update_client(client_id: int, data: ClientUpdate):
         raise HTTPException(404, "Client not found")
     audit_log("client.updated", entity_type="client",
               entity_id=client_id, payload=updates)
-    return api_single(row, entity="clients")
+    return row
 
 
 @router.delete("/{client_id}")

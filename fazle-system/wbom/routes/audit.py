@@ -7,13 +7,11 @@ from typing import Optional
 
 from database import execute_query
 from models import AuditLogResponse
-from response import api_response
-from openapi_models import AuditListResponse
 
 router = APIRouter(prefix="/audit", tags=["audit"])
 
 
-@router.get("", response_model=AuditListResponse)
+@router.get("")
 def list_audit_logs(
     event: Optional[str] = None,
     actor: Optional[str] = None,
@@ -52,4 +50,4 @@ def list_audit_logs(
         f"SELECT * FROM wbom_audit_logs {where} ORDER BY created_at DESC LIMIT %s OFFSET %s",
         tuple(params),
     )
-    return api_response(rows, entity="audit", total=total)
+    return rows
