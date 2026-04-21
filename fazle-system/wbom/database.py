@@ -206,6 +206,19 @@ def ensure_wbom_tables():
     except Exception as e:
         logger.warning("Migration 020 failed (may already be applied): %s", e)
 
+    # 021: Candidate funnel tables (Sprint-3 R0-01/R0-02/R0-03)
+    try:
+        import pathlib
+        _mig_021 = pathlib.Path(__file__).parent / "migrations" / "021_candidate_funnel.sql"
+        if _mig_021.exists():
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(_mig_021.read_text())
+                conn.commit()
+            logger.info("Applied migration 021_candidate_funnel")
+    except Exception as e:
+        logger.warning("Migration 021 failed (may already be applied): %s", e)
+
 
 # ── Audit helper ─────────────────────────────────────────────
 

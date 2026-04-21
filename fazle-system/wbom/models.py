@@ -1031,3 +1031,95 @@ class MonthlyPayrollReport(BaseModel):
     total_net_salary: float
     cash_summary:     MonthlyCashSummary
     payroll_runs:     list[Any] = []
+
+
+# ── Sprint-3: WhatsApp Candidate Funnel ───────────────────────────────────────
+
+class IntakeRequest(BaseModel):
+    phone:   str = Field(..., max_length=20)
+    message: str = Field(..., min_length=1, max_length=2000)
+
+
+class IntakeResponse(BaseModel):
+    reply:        str
+    action:       str    # created|collecting|scored|already_applied|ignored
+    candidate_id: Optional[int] = None
+
+
+class ScoreResult(BaseModel):
+    candidate_id: int
+    score:        int
+    score_bucket: str
+
+
+class RecruiterAssignRequest(BaseModel):
+    recruiter_name: str = Field(..., min_length=1, max_length=80)
+
+
+class StageAdvanceRequest(BaseModel):
+    to_stage: str = Field(
+        ...,
+        pattern=r"^(assigned|contacted|interviewed|hired|rejected|dropped)$",
+    )
+
+
+class ConversationEntry(BaseModel):
+    step:         str
+    direction:    str
+    message_text: str
+    collected_at: Optional[datetime] = None
+
+
+class CandidateDetailResponse(BaseModel):
+    candidate_id:        int
+    phone:               str
+    full_name:           Optional[str] = None
+    age:                 Optional[int] = None
+    area:                Optional[str] = None
+    job_preference:      Optional[str] = None
+    experience_years:    Optional[int] = None
+    available_join_date: Optional[date] = None
+    funnel_stage:        str
+    collection_step:     Optional[str] = None
+    score:               int = 0
+    score_bucket:        str = "cold"
+    assigned_recruiter:  Optional[str] = None
+    assigned_at:         Optional[datetime] = None
+    last_contact_at:     Optional[datetime] = None
+    next_follow_up_at:   Optional[datetime] = None
+    source:              str = "whatsapp"
+    notes:               Optional[str] = None
+    created_at:          datetime
+    updated_at:          datetime
+    conversation:        list[ConversationEntry] = []
+
+
+class CandidateListResponse(BaseModel):
+    items: list[dict]
+    total: int
+
+
+class RecruiterPerformance(BaseModel):
+    recruiter:       str
+    assigned_count:  int
+    hired_count:     int
+    conversion_pct:  float
+
+
+class NoResponseLead(BaseModel):
+    candidate_id:      int
+    full_name:         Optional[str] = None
+    phone:             str
+    assigned_recruiter: Optional[str] = None
+    assigned_at:       Optional[str] = None
+
+
+class RecruitmentMetricsResponse(BaseModel):
+    ref_date:             str
+    new_leads_today:      int
+    total_this_month:     int
+    hired_this_month:     int
+    conversion_rate:      float
+    funnel_breakdown:     dict
+    recruiter_performance: list[RecruiterPerformance]
+    no_response_leads:    list[NoResponseLead]
