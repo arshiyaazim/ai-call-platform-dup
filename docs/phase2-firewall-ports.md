@@ -238,12 +238,14 @@ Contabo provides a VNC console in their dashboard. Use it to run `sudo ufw allow
 Root SSH login is disabled by the SSH hardening script. Always login as the deploy user:
 ```bash
 ssh azim@5.189.131.48
+# You will land in /home/azim — the project is at /home/azim/ai-call-platform
+cd /home/azim/ai-call-platform
 ```
 If you haven't applied SSH hardening yet, run:
 ```bash
 sudo bash scripts/vps/ssh_hardening.sh
 ```
-The script requires your SSH public key to be in `/home/azim/.ssh/authorized_keys` **before** disabling password authentication. Use `--dry-run` to preview changes without applying them.
+The script automatically fixes `/home/azim/.ssh` (700) and `authorized_keys` (600) permissions, which are the most common cause of key-based login failures. It also requires at least one public key to already be present in `authorized_keys` before it disables password auth. Use `--dry-run` to preview changes without applying them.
 
 **Docker containers can't reach the internet?**
 The DOCKER-USER DROP rule only targets NEW inbound from non-internal interfaces. If outbound is broken, check the rule order — ESTABLISHED,RELATED must be first.

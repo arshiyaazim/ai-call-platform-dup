@@ -9,9 +9,11 @@
 #   - Enable public-key authentication (PubkeyAuthentication yes)
 #   - Restrict SSH access to the deploy user only (AllowUsers azim)
 #   - Set LoginGraceTime and MaxAuthTries limits
+#   - Fix ~/.ssh and ~/.ssh/authorized_keys permissions/ownership
 #
 # Safety guard: the script verifies that an authorized_keys file exists for
 # the deploy user BEFORE disabling password auth, preventing lock-out.
+# It also repairs common permission problems that prevent key-based login.
 #
 # Usage:
 #   sudo bash scripts/vps/ssh_hardening.sh [--deploy-user <user>] [--dry-run]
@@ -81,10 +83,42 @@ if ! id "${DEPLOY_USER}" &>/dev/null; then
 fi
 ok "Deploy user '${DEPLOY_USER}' exists."
 
-# ── Pre-flight: verify authorized_keys is populated ───────────────────────
 DEPLOY_USER_HOME=$(getent passwd "${DEPLOY_USER}" | cut -d: -f6)
-AUTH_KEYS="${DEPLOY_USER_HOME}/.ssh/authorized_keys"
+SSH_DIR="${DEPLOY_USER_HOME}/.ssh"
+AUTH_KEYS="${SSH_DIR}/authorized_keys"
 
+# ── Fix ~/.ssh directory permissions (common cause of login failures) ──────
+# SSH is strict: ~/.ssh must be 700 and owned by the user.
+# authorized_keys must be 600 and owned by the user.
+if [[ "${DRY_RUN}" == "false" ]]; then
+  info "Ensuring correct permissions on ${SSH_DIR} ..."
+
+  # Create ~/.ssh if it does not exist
+  if [[ ! -d "${SSH_DIR}" ]]; then
+    mkdir -p "${SSH_DIR}"
+    info "Created ${SSH_DIR}"
+  fi
+
+  # Fix ownership — must be owned by the deploy user, not root
+  chown "${DEPLOY_USER}:${DEPLOY_USER}" "${DEPLOY_USER_HOME}"
+  chown -R "${DEPLOY_USER}:${DEPLOY_USER}" "${SSH_DIR}"
+
+  # Fix directory permissions — must be 700 (rwx------)
+  chmod 700 "${SSH_DIR}"
+
+  # Fix authorized_keys permissions if the file exists
+  if [[ -f "${AUTH_KEYS}" ]]; then
+    chmod 600 "${AUTH_KEYS}"
+    chown "${DEPLOY_USER}:${DEPLOY_USER}" "${AUTH_KEYS}"
+    ok "Permissions fixed: ${AUTH_KEYS} → 600, owned by ${DEPLOY_USER}"
+  fi
+
+  ok "Permissions fixed: ${SSH_DIR} → 700, owned by ${DEPLOY_USER}"
+else
+  info "DRY RUN — would fix permissions on ${SSH_DIR} and ${AUTH_KEYS}"
+fi
+
+# ── Pre-flight: verify authorized_keys is populated ───────────────────────
 if [[ ! -f "${AUTH_KEYS}" ]] || [[ ! -s "${AUTH_KEYS}" ]]; then
   die "No authorized_keys found at ${AUTH_KEYS}.\n" \
       "Add your SSH public key before disabling password auth:\n" \
@@ -221,11 +255,17 @@ else
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────
+PROJECT_DIR="${DEPLOY_USER_HOME}/ai-call-platform"
+
 echo ""
 echo "============================================================"
 echo -e "${GREEN} SSH hardening applied successfully${NC}"
 echo ""
-echo "  Effective settings:"
+echo "  ~/.ssh permissions:"
+echo "    ${SSH_DIR}  → 700, owned by ${DEPLOY_USER}"
+echo "    ${AUTH_KEYS} → 600, owned by ${DEPLOY_USER}"
+echo ""
+echo "  Effective sshd settings:"
 echo "    PermitRootLogin            no"
 echo "    PasswordAuthentication     no"
 echo "    PubkeyAuthentication       yes"
@@ -235,5 +275,8 @@ echo "    MaxAuthTries               3"
 echo ""
 echo "  Verify in a NEW terminal before closing this session:"
 echo "    ssh ${DEPLOY_USER}@$(hostname -I | awk '{print $1}' 2>/dev/null || echo '<VPS_IP>')"
+echo "    # You will land in ${DEPLOY_USER_HOME}"
+echo "    # Project directory: ${PROJECT_DIR}"
+echo "    cd ${PROJECT_DIR}"
 echo "============================================================"
 echo ""
