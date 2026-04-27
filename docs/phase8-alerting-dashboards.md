@@ -101,17 +101,26 @@ bash scripts/vps/monitoring_smoke.sh
 scripts/vps/monitoring_smoke.sh
 ```
 
+The script automatically reads `GRAFANA_USER` and `GRAFANA_PASSWORD` from the
+project `.env` file (or from the environment) so it can call authenticated
+Grafana admin API endpoints. Make sure `.env` is populated (run
+`./scripts/gen-secrets.sh` if needed) before executing the smoke test.
+
 The script checks:
 1. All six monitoring containers are **running**
 2. Prometheus, Grafana, and Loki pass their **healthchecks**
 3. Prometheus `/-/healthy` and `/-/ready` endpoints respond OK
 4. Alert rule groups are loaded (count > 0)
 5. Grafana `/api/health` responds `ok`
-6. Loki `/ready` endpoint responds from inside its container
-7. Node Exporter and cAdvisor are reachable from the Prometheus container
-8. All Prometheus scrape targets report **UP**
+6. Grafana `/api/datasources` responds OK (authenticated with admin credentials)
+7. Grafana `platform-overview-v1` dashboard is provisioned and accessible
+8. Loki `/ready` endpoint responds from inside its container
+9. Node Exporter and cAdvisor are reachable from the Prometheus container
+10. All Prometheus scrape targets report **UP**
 
 Exit code `0` = all checks pass. Exit code equals the number of failures.
+Authenticated Grafana checks are **skipped** (not failed) if `GRAFANA_PASSWORD`
+is not available.
 
 ---
 

@@ -13,6 +13,7 @@
 #   - curl (usually pre-installed)
 #   - Running Docker Compose stack (monitoring-network services up)
 #   - Script should be run on the VPS host (127.0.0.1 bindings assumed)
+#   - .env (or GRAFANA_USER / GRAFANA_PASSWORD env vars) for Grafana auth checks
 # =============================================================================
 
 set -euo pipefail
@@ -29,7 +30,28 @@ info() { echo -e "${YELLOW}[INFO]${NC} $*"; }
 
 FAILURES=0
 
-# ── Helper: HTTP liveness probe ────────────────────────────────────────────
+# ── Load Grafana credentials from .env if not already in environment ───────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+ENV_FILE="${PROJECT_DIR}/.env"
+
+if [[ -z "${GRAFANA_USER:-}" || -z "${GRAFANA_PASSWORD:-}" ]]; then
+  if [[ -f "${ENV_FILE}" ]]; then
+    # Extract values; strip a single layer of surrounding double-quotes only.
+    # Note: passwords containing double-quote characters must be set via
+    # the GRAFANA_USER / GRAFANA_PASSWORD environment variables instead.
+    _guser=$(grep -E '^GRAFANA_USER=' "${ENV_FILE}" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/^"\(.*\)"$/\1/' || true)
+    _gpass=$(grep -E '^GRAFANA_PASSWORD=' "${ENV_FILE}" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/^"\(.*\)"$/\1/' || true)
+    GRAFANA_USER="${_guser:-${GRAFANA_USER:-admin}}"
+    GRAFANA_PASSWORD="${_gpass:-${GRAFANA_PASSWORD:-}}"
+  fi
+fi
+
+# Defaults to 'admin' if not set anywhere
+GRAFANA_USER="${GRAFANA_USER:-admin}"
+GRAFANA_PASSWORD="${GRAFANA_PASSWORD:-}"
+
+# ── Helper: HTTP liveness probe (no auth) ──────────────────────────────────
 # Usage: check_http <label> <url> [expected_string]
 check_http() {
   local label="$1"
@@ -40,6 +62,48 @@ check_http() {
 
   http_code=$(curl -s -o /tmp/_smoke_body -w "%{http_code}" \
     --max-time 10 --retry 2 --retry-delay 2 "$url" 2>/dev/null) || {
+    fail "${label}: curl failed (network error or timeout)"
+    return
+  }
+
+  body=$(cat /tmp/_smoke_body 2>/dev/null || echo "")
+
+  if [[ "$http_code" -lt 200 || "$http_code" -ge 400 ]]; then
+    fail "${label}: HTTP ${http_code} — expected 2xx/3xx (url=${url})"
+    return
+  fi
+
+  if [[ -n "$expect" && "$body" != *"$expect"* ]]; then
+    fail "${label}: response did not contain expected string '${expect}' (http=${http_code})"
+    return
+  fi
+
+  pass "${label}: HTTP ${http_code} OK"
+}
+
+# ── Helper: HTTP probe with basic auth (for Grafana admin API) ─────────────
+# Credentials are passed via Authorization header (base64-encoded) to avoid
+# exposing them in the process list visible to other system users.
+# Usage: check_http_auth <label> <url> [expected_string]
+check_http_auth() {
+  local label="$1"
+  local url="$2"
+  local expect="${3:-}"
+  local body
+  local http_code
+
+  if [[ -z "${GRAFANA_PASSWORD}" ]]; then
+    info "${label}: skipped — GRAFANA_PASSWORD not set (set it in .env or environment)"
+    return
+  fi
+
+  local auth_header
+  auth_header="Authorization: Basic $(printf '%s:%s' "${GRAFANA_USER}" "${GRAFANA_PASSWORD}" | base64 | tr -d '\n')"
+
+  http_code=$(curl -s -o /tmp/_smoke_body -w "%{http_code}" \
+    --max-time 10 --retry 2 --retry-delay 2 \
+    -H "${auth_header}" \
+    "$url" 2>/dev/null) || {
     fail "${label}: curl failed (network error or timeout)"
     return
   }
@@ -126,11 +190,14 @@ else
 fi
 echo ""
 
-# ── 4. Grafana liveness ─────────────────────────────────────────────────────
+# ── 4. Grafana liveness & auth ──────────────────────────────────────────────
 echo "--- Grafana ---"
 check_http "Grafana /api/health" "http://127.0.0.1:3030/api/health" "ok"
-check_http "Grafana datasources" \
+# /api/datasources and /api/dashboards require Grafana admin credentials
+check_http_auth "Grafana /api/datasources (admin)" \
   "http://127.0.0.1:3030/api/datasources" ""
+check_http_auth "Grafana platform-overview dashboard" \
+  "http://127.0.0.1:3030/api/dashboards/uid/platform-overview-v1" "platform-overview-v1"
 echo ""
 
 # ── 5. Loki liveness ───────────────────────────────────────────────────────
